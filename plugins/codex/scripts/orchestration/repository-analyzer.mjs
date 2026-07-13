@@ -214,7 +214,12 @@ function detectCommands(rootDir, pkg) {
   if (!isFile(makefilePath)) {
     return { test: null, build: null, lint: null };
   }
-  const content = fs.readFileSync(makefilePath, "utf8");
+  let content;
+  try {
+    content = fs.readFileSync(makefilePath, "utf8");
+  } catch {
+    return { test: null, build: null, lint: null };
+  }
   return {
     test: makefileHasTarget(content, "test") ? "make test" : null,
     build: makefileHasTarget(content, "build") ? "make build" : null,
@@ -274,7 +279,21 @@ function detectEntryPoints(rootDir, files, pkg) {
   const shebangScripts = files
     .filter((file) => /^scripts\/[^/]+\.mjs$/.test(file.relPath))
     .filter((file) => {
-      const content = fs.readFileSync(file.absPath, "utf8");
+      let stat;
+      try {
+        stat = fs.statSync(file.absPath);
+      } catch {
+        return false;
+      }
+      if (stat.size > MAX_SCANNED_FILE_BYTES) {
+        return false;
+      }
+      let content;
+      try {
+        content = fs.readFileSync(file.absPath, "utf8");
+      } catch {
+        return false;
+      }
       const firstLine = content.split(/\r?\n/, 1)[0] || "";
       return firstLine.startsWith("#!");
     })

@@ -237,3 +237,44 @@ test("writeProjectProfile: throws with validation errors for a schema-violating 
     fs.rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test("analyzeRepository: handles Makefile directory (not file) without throwing", () => {
+  const rootDir = makeTempDir();
+  try {
+    write(rootDir, "main.py", "print('hi')\n");
+    fs.mkdirSync(path.join(rootDir, "Makefile"));
+
+    const profile = analyzeRepository(rootDir);
+
+    assert.deepEqual(profile.commands, { test: null, build: null, lint: null });
+    assert.deepEqual(profile.languages, ["python"]);
+
+    const schema = loadOrchestrationSchema("project-profile");
+    const result = validateAgainstSchema(profile, schema);
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.valid, true);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("analyzeRepository: handles scripts directory entry (not file) without throwing", () => {
+  const rootDir = makeTempDir();
+  try {
+    write(rootDir, "main.py", "print('hi')\n");
+    write(rootDir, "scripts/ok.mjs", "#!/usr/bin/env node\nconsole.log('ok');\n");
+    fs.mkdirSync(path.join(rootDir, "scripts", "tool.mjs"));
+
+    const profile = analyzeRepository(rootDir);
+
+    assert.deepEqual(profile.structure.entryPoints, ["scripts/ok.mjs"]);
+    assert.equal(profile.structure.entryPoints.includes("scripts/tool.mjs"), false);
+
+    const schema = loadOrchestrationSchema("project-profile");
+    const result = validateAgainstSchema(profile, schema);
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.valid, true);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
