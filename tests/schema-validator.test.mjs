@@ -161,6 +161,22 @@ test("additionalProperties false reports the offending key by path", () => {
   assert.match(result.errors[0], /^\/b: /);
 });
 
+test("additionalProperties false without properties rejects all keys", () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false
+  };
+
+  const resultWithKey = validateAgainstSchema({ a: 1 }, schema);
+  assert.equal(resultWithKey.valid, false);
+  assert.equal(resultWithKey.errors.length, 1);
+  assert.match(resultWithKey.errors[0], /^\/a: additional property not allowed/);
+
+  const resultEmpty = validateAgainstSchema({}, schema);
+  assert.equal(resultEmpty.valid, true);
+  assert.deepEqual(resultEmpty.errors, []);
+});
+
 test("multiple simultaneous errors are all collected, not short-circuited", () => {
   const schema = {
     type: "object",

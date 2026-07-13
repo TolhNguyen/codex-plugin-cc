@@ -84,12 +84,13 @@ function validateNode(value, schema, pointer, errors) {
         validateNode(value[key], subSchema, `${pointer}/${key}`, errors);
       }
     }
+  }
 
-    if (schema.additionalProperties === false) {
-      for (const key of Object.keys(value)) {
-        if (!(key in schema.properties)) {
-          errors.push(`${displayPath(`${pointer}/${key}`)}: additional property not allowed`);
-        }
+  if (schema.additionalProperties === false && isPlainObject(value)) {
+    const allowedProperties = schema.properties ? Object.keys(schema.properties) : [];
+    for (const key of Object.keys(value)) {
+      if (!allowedProperties.includes(key)) {
+        errors.push(`${displayPath(`${pointer}/${key}`)}: additional property not allowed`);
       }
     }
   }
