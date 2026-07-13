@@ -258,17 +258,17 @@ test("analyzeRepository: handles Makefile directory (not file) without throwing"
   }
 });
 
-test("analyzeRepository: handles scripts directory entry (not file) without throwing", () => {
+test("analyzeRepository: skips oversized shebang scripts (>256KB) in entry-point detection", () => {
   const rootDir = makeTempDir();
   try {
     write(rootDir, "main.py", "print('hi')\n");
     write(rootDir, "scripts/ok.mjs", "#!/usr/bin/env node\nconsole.log('ok');\n");
-    fs.mkdirSync(path.join(rootDir, "scripts", "tool.mjs"));
+    write(rootDir, "scripts/big.mjs", `#!/usr/bin/env node\n${"x".repeat(262200)}`);
 
     const profile = analyzeRepository(rootDir);
 
     assert.deepEqual(profile.structure.entryPoints, ["scripts/ok.mjs"]);
-    assert.equal(profile.structure.entryPoints.includes("scripts/tool.mjs"), false);
+    assert.equal(profile.structure.entryPoints.includes("scripts/big.mjs"), false);
 
     const schema = loadOrchestrationSchema("project-profile");
     const result = validateAgainstSchema(profile, schema);
