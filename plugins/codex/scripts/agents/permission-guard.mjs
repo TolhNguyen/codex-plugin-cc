@@ -7,7 +7,7 @@ import path from "node:path";
  * must never escape `rootDir`, even via symlinks or `..`/absolute tricks.
  */
 
-const ALWAYS_WRITE_DENIED_GLOBS = [".ai-company/**", ".git/**"];
+const ALWAYS_WRITE_DENIED_GLOBS = [".ai-company", ".ai-company/**", ".git", ".git/**"];
 
 function isWin32() {
   return process.platform === "win32";
@@ -135,6 +135,16 @@ function resolveAndCheckContainment(rootDir, canonicalRootDir, relPath) {
   return resolved;
 }
 
+// Derives the canonical, `.`/`..`-free, forward-slash repo-relative path from
+// an already-resolved-and-contained absolute path. Deny-glob and allow-glob
+// matching must run against this rather than the caller-supplied `relPath`,
+// since the raw input can contain "./" or "../" segments that a glob like
+// ".ai-company/**" or "tests/**" would not lexically match even though the
+// resolved path does live inside (or outside) that scope.
+function toCanonicalRelative(rootDir, resolvedAbsPath) {
+  return toPosixRelative(path.relative(rootDir, resolvedAbsPath));
+}
+
 function isAlwaysWriteDenied(relPath) {
   const normalized = toPosixRelative(relPath);
   return ALWAYS_WRITE_DENIED_GLOBS.some((glob) => matchGlob(glob, normalized));
@@ -151,29 +161,34 @@ export function createPermissionGuard(rootDir, permissions) {
   const canonicalRootDir = safeRealpath(rootDir);
 
   function canRead(relPath) {
+    let resolved;
     try {
-      resolveAndCheckContainment(rootDir, canonicalRootDir, relPath);
+      resolved = resolveAndCheckContainment(rootDir, canonicalRootDir, relPath);
     } catch {
       return false;
     }
-    return matchesAny(readGlobs, relPath);
+    const canonicalRelPath = toCanonicalRelative(rootDir, resolved);
+    return matchesAny(readGlobs, canonicalRelPath);
   }
 
   function canWrite(relPath) {
+    let resolved;
     try {
-      resolveAndCheckContainment(rootDir, canonicalRootDir, relPath);
+      resolved = resolveAndCheckContainment(rootDir, canonicalRootDir, relPath);
     } catch {
       return false;
     }
-    if (isAlwaysWriteDenied(relPath)) {
+    const canonicalRelPath = toCanonicalRelative(rootDir, resolved);
+    if (isAlwaysWriteDenied(canonicalRelPath)) {
       return false;
     }
-    return matchesAny(writeGlobs, relPath);
+    return matchesAny(writeGlobs, canonicalRelPath);
   }
 
   function assertRead(relPath) {
     const resolved = resolveAndCheckContainment(rootDir, canonicalRootDir, relPath);
-    if (!matchesAny(readGlobs, relPath)) {
+    const canonicalRelPath = toCanonicalRelative(rootDir, resolved);
+    if (!matchesAny(readGlobs, canonicalRelPath)) {
       throw new Error(`Permission denied: read ${relPath}`);
     }
     return resolved;
@@ -181,7 +196,8 @@ export function createPermissionGuard(rootDir, permissions) {
 
   function assertWrite(relPath) {
     const resolved = resolveAndCheckContainment(rootDir, canonicalRootDir, relPath);
-    if (isAlwaysWriteDenied(relPath) || !matchesAny(writeGlobs, relPath)) {
+    const canonicalRelPath = toCanonicalRelative(rootDir, resolved);
+    if (isAlwaysWriteDenied(canonicalRelPath) || !matchesAny(writeGlobs, canonicalRelPath)) {
       throw new Error(`Permission denied: write ${relPath}`);
     }
     return resolved;

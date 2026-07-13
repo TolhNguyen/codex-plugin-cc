@@ -159,6 +159,55 @@ test("guard: .git/** is always write-denied even when globs allow everything", (
   });
 });
 
+test("guard: dot-relative write into always-denied dir throws (canonical glob matching)", () => {
+  withTempDir((rootDir) => {
+    fs.mkdirSync(path.join(rootDir, ".ai-company", "agents"), { recursive: true });
+    const guard = createPermissionGuard(rootDir, { read: ["**"], write: ["**"] });
+
+    assert.throws(
+      () => guard.assertWrite("./.ai-company/agents/x.json"),
+      /Permission denied: write/
+    );
+    assert.equal(guard.canWrite("./.ai-company/agents/x.json"), false);
+  });
+});
+
+test("guard: dot-relative and dot-dot-relative writes into .git throw (canonical glob matching)", () => {
+  withTempDir((rootDir) => {
+    fs.mkdirSync(path.join(rootDir, ".git"), { recursive: true });
+    const guard = createPermissionGuard(rootDir, { read: ["**"], write: ["**"] });
+
+    assert.throws(() => guard.assertWrite("./.git/config"), /Permission denied: write/);
+    assert.throws(() => guard.assertWrite("tests/../.git/config"), /Permission denied: write/);
+  });
+});
+
+test("guard: a '..'-resolved path outside the allowed write scope throws even though the raw string starts with the allowed prefix", () => {
+  withTempDir((rootDir) => {
+    fs.mkdirSync(path.join(rootDir, "tests"), { recursive: true });
+    const guard = createPermissionGuard(rootDir, { read: ["**"], write: ["tests/**"] });
+
+    assert.throws(
+      () => guard.assertWrite("tests/../secret.txt"),
+      /Permission denied: write/
+    );
+    assert.equal(guard.canWrite("tests/../secret.txt"), false);
+  });
+});
+
+test("guard: bare '.ai-company' and '.git' segments are always write-denied", () => {
+  withTempDir((rootDir) => {
+    fs.mkdirSync(path.join(rootDir, ".ai-company"), { recursive: true });
+    fs.mkdirSync(path.join(rootDir, ".git"), { recursive: true });
+    const guard = createPermissionGuard(rootDir, { read: ["**"], write: ["**"] });
+
+    assert.equal(guard.canWrite(".ai-company"), false);
+    assert.equal(guard.canWrite(".git"), false);
+    assert.throws(() => guard.assertWrite(".ai-company"), /Permission denied: write/);
+    assert.throws(() => guard.assertWrite(".git"), /Permission denied: write/);
+  });
+});
+
 test("guard: symlink pointing outside rootDir is denied", () => {
   withTempDir((rootDir) => {
     const outsideDir = makeTempDir();
