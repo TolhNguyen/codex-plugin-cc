@@ -97,12 +97,18 @@ export function createMemoryReviewer({ rootDir, runtime, managerAgent, pluginRoo
  * is recorded as `{ proposalId, action: "failed", error }` and does NOT
  * abort the batch — the remaining pending proposals are still processed.
  *
+ * Only proposals belonging to `campaignId` are ever considered — a
+ * proposal recorded under a different campaign must never be decided (and
+ * have its audit/budget attributed) by this campaign's review batch.
+ *
  * @param {string} rootDir
  * @param {{ campaignId: string, decide: Function, decidedBy: string, guards?: { beforeManagerCall?: Function } }} options
  * @returns {Promise<{ processed: { proposalId: string, action: string, error?: string }[], halted: boolean }>}
  */
 export async function reviewPendingProposals(rootDir, { campaignId, decide, decidedBy, guards = {} } = {}) {
-  const pending = listProposals(rootDir, { status: "pending" });
+  const pending = listProposals(rootDir, { status: "pending" }).filter(
+    (proposal) => proposal.campaignId === campaignId
+  );
   const processed = [];
 
   for (const proposal of pending) {

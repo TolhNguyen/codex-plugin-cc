@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -240,6 +241,34 @@ test("setCampaignStatus: awaiting_approval -> running requires an approval recor
       () => setCampaignStatus(rootDir, campaign.campaignId, "running", {}),
       /Approval is required/
     );
+  });
+});
+
+test("setCampaignStatus: resuming a paused campaign with a new approval appends it (not just the original approval) and the audit event carries the approver — Must-fix 4", () => {
+  withTempDir((rootDir) => {
+    const campaign = createCampaign(rootDir, { brief: "a", acceptanceCriteria: ["x"] });
+    setCampaignStatus(rootDir, campaign.campaignId, "awaiting_approval");
+
+    const firstApproval = { role: "exec-tin", decision: "approve", at: "2026-07-14T00:00:00.000Z" };
+    setCampaignStatus(rootDir, campaign.campaignId, "running", firstApproval);
+    setCampaignStatus(rootDir, campaign.campaignId, "paused");
+
+    const secondApproval = { role: "exec-maria", decision: "approve", at: "2026-07-14T01:00:00.000Z" };
+    const resumed = setCampaignStatus(rootDir, campaign.campaignId, "running", secondApproval);
+
+    // The approver of the RESUME decision must be recorded, not silently
+    // discarded just because `from` is "paused" rather than
+    // "awaiting_approval".
+    assert.deepEqual(resumed.approvals, [firstApproval, secondApproval]);
+
+    const persisted = loadCampaign(rootDir, campaign.campaignId);
+    assert.deepEqual(persisted.approvals, [firstApproval, secondApproval]);
+
+    const events = readAuditEvents(rootDir, campaign.campaignId);
+    const resumeEvent = events
+      .filter((event) => event.event === "campaign_status" && event.to === "running")
+      .pop();
+    assert.equal(resumeEvent.approvedBy, "exec-maria");
   });
 });
 
@@ -937,6 +966,34 @@ test("orchestration-cli campaign review-proposals: budget exhaustion pauses the 
     });
     const shown = JSON.parse(showResult.stdout);
     assert.equal(shown.campaign.status, "paused");
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+// Must-fix 1: `/codex:campaign "$ARGUMENTS"` forwards the action word and all
+// flags as ONE quoted shell token (e.g. "create --brief x --criteria y ..."),
+// not as separate argv entries. `handleCampaign` destructures its own
+// leading action word out of argv, so this exercises the exact real calling
+// convention, not just flag parsing.
+test("orchestration-cli campaign invoked as ONE quoted argument string (the real /codex:campaign calling convention) still splits the action and flags — Must-fix 1", () => {
+  const rootDir = makeTempDir("campaign-cli-argv-");
+  try {
+    // Absolute node path so `run()` does not fall back to `shell: true` on
+    // Windows, which would silently re-split this single argv token on
+    // spaces before it ever reached the CLI — see the identical note in
+    // topology-planner.test.mjs. The child's OS-level cwd (not a `--cwd`
+    // flag) controls where the campaign is written, so no Windows path
+    // (backslashes would be eaten as escapes by splitRawArgumentString) is
+    // embedded inside the single quoted token.
+    const result = run(process.execPath, [CLI, "campaign", "create --brief x --criteria y --json"], {
+      cwd: rootDir
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const created = JSON.parse(result.stdout);
+    assert.ok(created.campaignId);
+    assert.equal(created.brief, "x");
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
   }

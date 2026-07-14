@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
-import { parseArgs } from "./lib/args.mjs";
+import { parseArgs, normalizeArgv } from "./lib/args.mjs";
 import { ensureAbsolutePath, readJsonFile } from "./lib/fs.mjs";
 import { loadOrchestrationSchema, validateAgainstSchema } from "./lib/schema-validator.mjs";
 import { analyzeRepository, writeProjectProfile } from "./orchestration/repository-analyzer.mjs";
@@ -23,6 +23,7 @@ import { listProposals } from "./memory/proposal-store.mjs";
 import { createMemoryReviewer, reviewPendingProposals } from "./memory/memory-review.mjs";
 import { loadAgent } from "./agents/agent-registry.mjs";
 import { createCodexRuntime } from "./runtimes/codex-runtime.mjs";
+import { listSkills, loadSkill, setSkillStatus } from "./skills/skill-registry.mjs";
 
 function printUsage() {
   console.log(
@@ -39,7 +40,9 @@ function printUsage() {
       "      [--manager-agent <id>] [--cwd <path>] [--json]",
       "  node scripts/orchestration-cli.mjs campaign approve --approved-by <role> <campaignId> [--cwd <path>] [--json]",
       "  node scripts/orchestration-cli.mjs campaign review-proposals <campaignId> --decided-by <role> [--cwd <path>] [--json]",
-      "  node scripts/orchestration-cli.mjs campaign accept <campaignId> --accepted-by <role> [--cwd <path>] [--json]"
+      "  node scripts/orchestration-cli.mjs campaign accept <campaignId> --accepted-by <role> [--cwd <path>] [--json]",
+      "  node scripts/orchestration-cli.mjs skill list [--status <s>] [--cwd <path>] [--json]",
+      "  node scripts/orchestration-cli.mjs skill activate <skillId> --approved-by <role> [--cwd <path>] [--json]"
     ].join("\n")
   );
 }
@@ -497,6 +500,113 @@ async function handleCampaign(argv) {
   }
 }
 
+// --- skill subcommands -------------------------------------------------
+
+const SKILL_STATUS_ORDER = ["draft", "evaluating", "approved", "active"];
+
+/**
+ * Walks a skill forward from its current status to "active", one legal
+ * transition at a time, via the existing `setSkillStatus` (which itself
+ * requires `approvedBy` for the evaluating->approved and approved->active
+ * transitions). Already-active skills are a no-op success; any other
+ * terminal/unknown status (e.g. "deprecated") is a clear error rather than a
+ * silent no-op.
+ */
+function walkSkillToActive(rootDir, skillId, approvedBy) {
+  const skill = loadSkill(rootDir, skillId);
+  if (!skill) {
+    throw new Error(`Skill not found: ${skillId}`);
+  }
+  if (skill.status === "active") {
+    return { skill, alreadyActive: true };
+  }
+
+  const startIndex = SKILL_STATUS_ORDER.indexOf(skill.status);
+  if (startIndex === -1) {
+    throw new Error(
+      `Skill ${skillId} is in status "${skill.status}", which cannot be activated. ` +
+        `Only skills in one of ${SKILL_STATUS_ORDER.slice(0, -1).join(", ")} can be walked to active.`
+    );
+  }
+
+  for (let index = startIndex + 1; index < SKILL_STATUS_ORDER.length; index += 1) {
+    setSkillStatus(rootDir, skillId, SKILL_STATUS_ORDER[index], { approvedBy });
+  }
+
+  return { skill: loadSkill(rootDir, skillId), alreadyActive: false };
+}
+
+async function handleSkillList(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "status"],
+    booleanOptions: ["json"]
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const skills = listSkills(cwd, { status: options.status });
+
+  if (options.json) {
+    outputResult({ skills }, true);
+    return;
+  }
+
+  if (skills.length === 0) {
+    outputResult("(no skills)\n", false);
+    return;
+  }
+
+  const lines = skills.map((skill) => `- ${skill.id}@${skill.version} (${skill.status})`);
+  outputResult(`${lines.join("\n")}\n`, false);
+}
+
+async function handleSkillActivate(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "approved-by"],
+    booleanOptions: ["json"]
+  });
+  const skillId = positionals[0];
+  if (!skillId) {
+    throw new Error("Missing required <skillId>.");
+  }
+  if (!options["approved-by"]) {
+    throw new Error("Missing required --approved-by <role>. Activating a skill requires a named approver.");
+  }
+
+  const cwd = resolveCommandCwd(options);
+  const { skill, alreadyActive } = walkSkillToActive(cwd, skillId, options["approved-by"]);
+
+  const payload = {
+    skillId: skill.id,
+    status: skill.status,
+    approvedBy: skill.approvedBy ?? null,
+    alreadyActive
+  };
+
+  if (options.json) {
+    outputResult(payload, true);
+    return;
+  }
+
+  const rendered = alreadyActive
+    ? `Skill ${skill.id} is already active.\n`
+    : `Skill ${skill.id} is now active (approved by ${skill.approvedBy}).\n`;
+  outputResult(rendered, false);
+}
+
+async function handleSkill(argv) {
+  const [action, ...rest] = argv;
+  switch (action) {
+    case "list":
+      await handleSkillList(rest);
+      break;
+    case "activate":
+      await handleSkillActivate(rest);
+      break;
+    default:
+      throw new Error(`Unknown skill action: ${action}`);
+  }
+}
+
 async function handleApproveTopology(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd", "approved-by"],
@@ -514,11 +624,18 @@ async function handleApproveTopology(argv) {
 }
 
 async function main() {
-  const [subcommand, ...argv] = process.argv.slice(2);
+  const [subcommand, ...rawArgv] = process.argv.slice(2);
   if (!subcommand || subcommand === "help" || subcommand === "--help") {
     printUsage();
     return;
   }
+
+  // Command markdown files forward `$ARGUMENTS` QUOTED — i.e. as a single
+  // shell token (e.g. `bootstrap "$ARGUMENTS"`). Normalize that single token
+  // back into real argv BEFORE dispatch so every subcommand (including
+  // `campaign`, whose handler destructures its own leading action word out
+  // of this same argv) sees properly split flags.
+  const argv = normalizeArgv(rawArgv);
 
   switch (subcommand) {
     case "bootstrap":
@@ -529,6 +646,9 @@ async function main() {
       break;
     case "campaign":
       await handleCampaign(argv);
+      break;
+    case "skill":
+      await handleSkill(argv);
       break;
     default:
       throw new Error(`Unknown subcommand: ${subcommand}`);

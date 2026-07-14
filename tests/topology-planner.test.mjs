@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -15,6 +16,7 @@ import { loadAgent } from "../plugins/codex/scripts/agents/agent-registry.mjs";
 import { loadSkill } from "../plugins/codex/scripts/skills/skill-registry.mjs";
 import { resolveProvider } from "../plugins/codex/scripts/runtimes/provider-presets.mjs";
 import { makeTempDir, run } from "./helpers.mjs";
+import { installFakeCodex, buildEnv } from "./fake-codex-fixture.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = path.join(ROOT, "plugins", "codex", "scripts", "orchestration-cli.mjs");
@@ -273,6 +275,64 @@ test("orchestration-cli approve-topology without --approved-by exits 1 and menti
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /approved-by/i);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+// 6. Must-fix 1: the real `/codex:bootstrap-agents "$ARGUMENTS"` calling
+// convention forwards ALL flags as ONE quoted shell token, not as separate
+// argv entries. The CLI must split that single token before parsing flags.
+test("orchestration-cli bootstrap invoked as ONE quoted argument string (the real /codex:bootstrap-agents calling convention) still recognizes --profile-only and never calls Codex — Must-fix 1", () => {
+  const rootDir = makeTempDir("topology-planner-cli-argv-");
+  const binDir = makeTempDir("topology-planner-cli-argv-bin-");
+  installFakeCodex(binDir);
+  try {
+    // Use the absolute node executable path (not the bare "node" string) so
+    // the shared `run()` helper does NOT go through `shell: true` on
+    // Windows — a real Bash invocation of `node ".../cli.mjs" bootstrap
+    // "$ARGUMENTS"` hands the child process ONE literal argv token for
+    // `$ARGUMENTS`; routing this through cmd.exe would silently re-split it
+    // on spaces and defeat the point of this test. The child's OS-level cwd
+    // (not a `--cwd` flag) controls where the profile is written, so no
+    // Windows path (with backslashes `splitRawArgumentString` would treat as
+    // escapes) ever has to be embedded inside the single quoted token.
+    const result = run(process.execPath, [CLI, "bootstrap", "--profile-only --json"], {
+      cwd: rootDir,
+      env: buildEnv(binDir)
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.ok(payload.profile);
+    assert.equal(payload.proposal, undefined);
+
+    const profilePath = path.join(rootDir, ".ai-company", "project-profile.json");
+    assert.ok(fs.existsSync(profilePath));
+
+    // profile-only must never invoke Codex: the fake codex only ever writes
+    // its state file when it is actually spawned and talked to.
+    assert.equal(fs.existsSync(path.join(binDir, "fake-codex-state.json")), false);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(binDir, { recursive: true, force: true });
+  }
+});
+
+test("orchestration-cli approve-topology invoked as ONE quoted argument string still recognizes --approved-by — Must-fix 1", () => {
+  const rootDir = makeTempDir("topology-planner-cli-argv-");
+  try {
+    writeTopologyProposal(rootDir, makeTwoAgentProposal());
+
+    // See the note above: use the child's OS-level cwd instead of embedding
+    // a Windows path (with backslashes) inside the single quoted token.
+    const result = run(process.execPath, [CLI, "approve-topology", "--approved-by tech-lead --json"], {
+      cwd: rootDir
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.deepEqual([...payload.agents].sort(), ["docs-worker", "test-worker-01"]);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
   }

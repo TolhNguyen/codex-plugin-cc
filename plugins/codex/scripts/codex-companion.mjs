@@ -6,7 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
+import { parseArgs, normalizeArgv } from "./lib/args.mjs";
 import {
     buildPersistentTaskThreadName,
     DEFAULT_CONTINUE_PROMPT,
@@ -125,17 +125,6 @@ function normalizeReasoningEffort(effort) {
     );
   }
   return normalized;
-}
-
-function normalizeArgv(argv) {
-  if (argv.length === 1) {
-    const [raw] = argv;
-    if (!raw || !raw.trim()) {
-      return [];
-    }
-    return splitRawArgumentString(raw);
-  }
-  return argv;
 }
 
 function parseCommandInput(argv, config = {}) {

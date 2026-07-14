@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   saveSkill,
@@ -13,6 +14,12 @@ import {
   assertSkillsActive,
   recordEvaluation
 } from "../plugins/codex/scripts/skills/skill-registry.mjs";
+import { saveAgent } from "../plugins/codex/scripts/agents/agent-registry.mjs";
+import { routeTask } from "../plugins/codex/scripts/orchestration/task-router.mjs";
+import { run } from "./helpers.mjs";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const CLI = path.join(ROOT, "plugins", "codex", "scripts", "orchestration-cli.mjs");
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-"));
@@ -206,6 +213,144 @@ test("assertSkillsActive throws naming every missing or non-active ref in a mix"
         return true;
       }
     );
+  });
+});
+
+// --- CLI: `skill activate` (Must-fix 2) ------------------------------------
+//
+// Before this fix, no CLI path could ever move a skill from "draft" to
+// "active" — `setSkillStatus` was exported and unit-tested but never called
+// from any command, so `approveTopology`'s draft skills (and thus every
+// skill-requiring task) permanently dead-ended at `assertSkillsActive`.
+
+function makeRoutableAgent(overrides = {}) {
+  return {
+    id: "worker-a",
+    name: "Worker A",
+    type: "persistent",
+    status: "active",
+    ownership: { primary: ["src/**"], secondary: [], excluded: [] },
+    responsibilities: ["do work"],
+    skills: ["technical/node-test-authoring@1.0.0"],
+    memory: { namespaces: ["agent/worker-a"] },
+    permissions: { read: ["**"], write: ["src/**"] },
+    runtime: { provider: "deepseek", model: "deepseek-chat" },
+    limits: { maxAttemptsPerTask: 3, maxExecutionMinutes: 20, maxToolCalls: 40 },
+    ...overrides
+  };
+}
+
+function makeRoutableTask(overrides = {}) {
+  return {
+    taskId: "task-1",
+    campaignId: "camp-1",
+    title: "Add a test",
+    goal: "Extend coverage for the alpha module.",
+    affectedPaths: ["src/file.js"],
+    requiredSkills: ["technical/node-test-authoring@1.0.0"],
+    owner: "worker-a",
+    verificationCommands: ["npm test"],
+    acceptanceCriteria: ["it works"],
+    maxAttempts: 3,
+    status: "routed",
+    ...overrides
+  };
+}
+
+test("orchestration-cli skill activate walks a draft skill to active, persists the approver, and unblocks routing — Must-fix 2", () => {
+  withTempDir((rootDir) => {
+    saveSkill(rootDir, makeSkill({ status: "draft" }));
+    saveAgent(rootDir, makeRoutableAgent());
+
+    const result = run(
+      "node",
+      [
+        CLI,
+        "skill",
+        "activate",
+        "technical/node-test-authoring",
+        "--approved-by",
+        "tech-lead",
+        "--cwd",
+        rootDir,
+        "--json"
+      ],
+      { cwd: ROOT }
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.status, "active");
+    assert.equal(payload.approvedBy, "tech-lead");
+    assert.equal(payload.alreadyActive, false);
+
+    const activated = loadSkill(rootDir, "technical/node-test-authoring");
+    assert.equal(activated.status, "active");
+    assert.equal(activated.approvedBy, "tech-lead");
+
+    // assertSkillsActive now passes...
+    assertSkillsActive(rootDir, ["technical/node-test-authoring@1.0.0"]);
+
+    // ...and routeTask, which hard-gates on assertSkillsActive, succeeds too.
+    const routing = routeTask(rootDir, makeRoutableTask());
+    assert.equal(routing.owner.id, "worker-a");
+  });
+});
+
+test("orchestration-cli skill activate without --approved-by exits 1, mentions approved-by, and leaves the skill in draft — Must-fix 2", () => {
+  withTempDir((rootDir) => {
+    saveSkill(rootDir, makeSkill({ status: "draft" }));
+
+    const result = run(
+      "node",
+      [CLI, "skill", "activate", "technical/node-test-authoring", "--cwd", rootDir],
+      { cwd: ROOT }
+    );
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /approved-by/i);
+    assert.equal(loadSkill(rootDir, "technical/node-test-authoring").status, "draft");
+  });
+});
+
+test("orchestration-cli skill activate is idempotent when the skill is already active", () => {
+  withTempDir((rootDir) => {
+    saveSkill(rootDir, makeSkill({ status: "active" }));
+
+    const result = run(
+      "node",
+      [
+        CLI,
+        "skill",
+        "activate",
+        "technical/node-test-authoring",
+        "--approved-by",
+        "tech-lead",
+        "--cwd",
+        rootDir,
+        "--json"
+      ],
+      { cwd: ROOT }
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.alreadyActive, true);
+    assert.equal(payload.status, "active");
+  });
+});
+
+test("orchestration-cli skill list reports status and version", () => {
+  withTempDir((rootDir) => {
+    saveSkill(rootDir, makeSkill({ status: "draft" }));
+
+    const result = run("node", [CLI, "skill", "list", "--cwd", rootDir, "--json"], { cwd: ROOT });
+
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.skills.length, 1);
+    assert.equal(payload.skills[0].id, "technical/node-test-authoring");
+    assert.equal(payload.skills[0].status, "draft");
   });
 });
 

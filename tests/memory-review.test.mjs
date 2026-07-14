@@ -6,6 +6,7 @@ import path from "node:path";
 import { createMemoryReviewer, reviewPendingProposals } from "../plugins/codex/scripts/memory/memory-review.mjs";
 import { recordProposals, loadProposal } from "../plugins/codex/scripts/memory/proposal-store.mjs";
 import { readMemory } from "../plugins/codex/scripts/memory/memory-store.mjs";
+import { readAuditEvents } from "../plugins/codex/scripts/orchestration/audit-log.mjs";
 import { createRuntimeResult } from "../plugins/codex/scripts/runtimes/runtime-base.mjs";
 import { makeTempDir } from "./helpers.mjs";
 
@@ -299,6 +300,71 @@ test("reviewPendingProposals: a mid-batch applyDecision failure is recorded as '
     assert.equal(loadProposal(rootDir, "MEM-PROP-1").status, "approved");
     assert.equal(loadProposal(rootDir, "MEM-PROP-2").status, "pending");
     assert.equal(loadProposal(rootDir, "MEM-PROP-3").status, "approved");
+  });
+});
+
+test("reviewPendingProposals: scopes the batch to campaignId — another campaign's pending proposal is never decided or misfiled — Must-fix 3", async () => {
+  await withTempDir(async (rootDir) => {
+    const { stored: storedA } = recordProposals(rootDir, {
+      campaignId: "camp-AAA",
+      taskId: "task-a",
+      agentId: "worker-a",
+      proposals: [
+        {
+          scope: "project/shared",
+          type: "convention",
+          content: "A's proposal.",
+          evidence: ["e"],
+          confidence: 0.9
+        }
+      ]
+    });
+    const { stored: storedB } = recordProposals(rootDir, {
+      campaignId: "camp-BBB",
+      taskId: "task-b",
+      agentId: "worker-b",
+      proposals: [
+        {
+          scope: "project/shared",
+          type: "convention",
+          content: "B's proposal.",
+          evidence: ["e"],
+          confidence: 0.9
+        }
+      ]
+    });
+    const proposalA = storedA[0];
+    const proposalB = storedB[0];
+
+    const decide = async () => ({ action: "approve", reason: "good" });
+
+    const result = await reviewPendingProposals(rootDir, {
+      campaignId: "camp-AAA",
+      decide,
+      decidedBy: "exec-tin"
+    });
+
+    assert.equal(result.halted, false);
+    assert.deepEqual(result.processed, [{ proposalId: proposalA.proposalId, action: "approve" }]);
+
+    assert.equal(loadProposal(rootDir, proposalA.proposalId).status, "approved");
+    // B's proposal must be untouched: still pending, never decided.
+    assert.equal(loadProposal(rootDir, proposalB.proposalId).status, "pending");
+
+    // Only A's content made it into official memory.
+    const memory = readMemory(rootDir, "project/shared");
+    assert.deepEqual(
+      memory.entries.map((entry) => entry.content),
+      ["A's proposal."]
+    );
+
+    // A's audit contains the decision; B's audit contains none.
+    const auditA = readAuditEvents(rootDir, "camp-AAA");
+    const auditB = readAuditEvents(rootDir, "camp-BBB");
+    assert.ok(
+      auditA.some((event) => event.event === "memory_decision" && event.proposalId === proposalA.proposalId)
+    );
+    assert.equal(auditB.filter((event) => event.event === "memory_decision").length, 0);
   });
 });
 

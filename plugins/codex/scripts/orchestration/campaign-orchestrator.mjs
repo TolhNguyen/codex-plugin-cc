@@ -179,16 +179,28 @@ export function setCampaignStatus(rootDir, campaignId, status, approval = null) 
     throw new Error(`Illegal campaign status transition: ${from} -> ${status}`);
   }
 
-  if (from === "awaiting_approval" && status === "running") {
-    if (!approval || !approval.role) {
+  if (status === "running") {
+    if (approval && approval.role) {
+      // Any transition into "running" — not just awaiting_approval ->
+      // running — records the approver when one is given. Resuming a
+      // paused (e.g. budget-exhausted) campaign is exactly the kind of
+      // decision that must stay attributable, so its approval record must
+      // never be silently dropped just because `from` isn't
+      // "awaiting_approval".
+      campaign.approvals = [...(campaign.approvals ?? []), approval];
+    } else if (from === "awaiting_approval") {
       throw new Error(`Approval is required for campaign status transition: ${from} -> ${status}`);
     }
-    campaign.approvals = [...(campaign.approvals ?? []), approval];
   }
 
   campaign.status = status;
   saveCampaign(rootDir, campaign);
-  appendAuditEvent(rootDir, campaignId, { event: "campaign_status", from, to: status });
+  appendAuditEvent(rootDir, campaignId, {
+    event: "campaign_status",
+    from,
+    to: status,
+    approvedBy: approval?.role ?? null
+  });
 
   return campaign;
 }
