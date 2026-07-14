@@ -449,6 +449,45 @@ test("runReviewLoop: reviewFn throwing (manager runtime failure) halts the loop 
   });
 });
 
+// 7e. workerRuntime.execute that throws must halt the loop and audit
+// worker_failed, just like reviewFn throwing halts with review_failed.
+test("runReviewLoop: workerRuntime.execute that throws halts the loop and audits worker_failed", async () => {
+  await withTempDir(async (rootDir) => {
+    const task = makeTask();
+    const agent = makeAgent();
+    const buildWorkerContext = () => ({});
+
+    const workerRuntime = {
+      execute: async () => {
+        throw new Error("Worker runtime crashed");
+      }
+    };
+    const reviewFn = makeScriptedReviewFn([]);
+
+    const result = await runReviewLoop(rootDir, {
+      campaignId: "camp-1",
+      task,
+      agent,
+      workerRuntime,
+      reviewFn,
+      buildWorkerContext
+    });
+
+    assert.equal(result.outcome, "halted");
+    assert.match(result.reason, /Worker runtime crashed/);
+
+    const events = readAuditEvents(rootDir, "camp-1");
+    const failedEvent = events.find((event) => event.event === "worker_failed");
+    assert.ok(failedEvent, "expected a worker_failed audit event");
+    assert.equal(failedEvent.taskId, task.taskId);
+    assert.equal(failedEvent.attempt, 1);
+    assert.match(failedEvent.error, /Worker runtime crashed/);
+    assert.ok(events.some((event) => event.event === "loop_halted"));
+    assert.equal(events.at(-1).event, "loop_finished");
+    assert.equal(events.at(-1).outcome, "halted");
+  });
+});
+
 // 7c. decision.taskId must match task.taskId; a mismatch is a
 // manager-integrity failure routed through the same halt handling.
 test("runReviewLoop: a decision with a mismatched taskId halts as a manager-integrity failure", async () => {

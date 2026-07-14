@@ -218,8 +218,20 @@ export async function runReviewLoop(
 
     audit(rootDir, campaignId, { event: "task_attempt_started", taskId: task.taskId, attempt, agentId: agent.id });
 
-    const context = buildWorkerContext(task, agent, feedback);
-    const workerResult = await workerRuntime.execute(agent, task, context);
+    let workerResult;
+    try {
+      const context = buildWorkerContext(task, agent, feedback);
+      workerResult = await workerRuntime.execute(agent, task, context);
+    } catch (error) {
+      audit(rootDir, campaignId, {
+        event: "worker_failed",
+        taskId: task.taskId,
+        attempt,
+        error: error.message
+      });
+      audit(rootDir, campaignId, { event: "loop_halted", taskId: task.taskId, attempt, reason: error.message });
+      return finish("halted", attempt, { reason: error.message });
+    }
     lastWorkerResult = workerResult;
 
     audit(rootDir, campaignId, {
