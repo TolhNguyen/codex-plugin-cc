@@ -29,12 +29,12 @@ function extractWorkerResultJson(workerResult) {
   }
 }
 
-function buildReviewPrompt(pluginRoot, task, attemptNumber, workerResult) {
+function buildReviewPrompt(pluginRoot, task, attemptNumber, workerResult, maxAttempts = task.maxAttempts) {
   const template = loadPromptTemplate(pluginRoot, "orchestration/review-decision");
   return interpolateTemplate(template, {
     TASK_JSON: JSON.stringify(task, null, 2),
     ATTEMPT_NUMBER: String(attemptNumber),
-    MAX_ATTEMPTS: String(task.maxAttempts),
+    MAX_ATTEMPTS: String(maxAttempts),
     WORKER_RESULT_JSON: extractWorkerResultJson(workerResult),
     ACCEPTANCE_CRITERIA: (task.acceptanceCriteria ?? []).map((item) => `- ${item}`).join("\n")
   });
@@ -61,16 +61,23 @@ function tryParseAndValidate(output, schema) {
 }
 
 /**
- * Builds a `reviewFn(task, attemptNumber, workerResult)` backed by a manager
- * runtime (normally the Codex manager runtime). One schema-repair retry is
- * attempted before giving up, mirroring `topology-planner.mjs`.
+ * Builds a `reviewFn(task, attemptNumber, workerResult, { maxAttempts })`
+ * backed by a manager runtime (normally the Codex manager runtime). The 4th
+ * (options) argument is optional/backward-compatible: when omitted (or
+ * `maxAttempts` is not supplied), the prompt falls back to `task.maxAttempts`.
+ * Callers that enforce a tighter, agent-capped budget (see
+ * `computeMaxAttempts` in `runReviewLoop`) should pass that effective value
+ * so the manager's prompt reflects the real remaining budget. One
+ * schema-repair retry is attempted before giving up, mirroring
+ * `topology-planner.mjs`.
  *
  * @param {{ rootDir: string, runtime: { execute: Function }, managerAgent: object, pluginRoot?: string }} options
  */
 export function createCodexReviewer({ rootDir, runtime, managerAgent, pluginRoot = PLUGIN_ROOT_DIR } = {}) {
-  return async function reviewFn(task, attemptNumber, workerResult) {
+  return async function reviewFn(task, attemptNumber, workerResult, { maxAttempts } = {}) {
     const schema = loadOrchestrationSchema("review-decision");
-    const prompt = buildReviewPrompt(pluginRoot, task, attemptNumber, workerResult);
+    const effectiveMaxAttempts = maxAttempts ?? task.maxAttempts;
+    const prompt = buildReviewPrompt(pluginRoot, task, attemptNumber, workerResult, effectiveMaxAttempts);
 
     const firstRun = await runtime.execute(managerAgent, task, { prompt, outputSchema: schema });
     if (firstRun.status !== "completed") {
@@ -128,10 +135,11 @@ function mapDecisionToTaskStatus(decision) {
 function computeMaxAttempts(task, agent) {
   const fromTask = task.maxAttempts;
   const fromAgent = agent?.limits?.maxAttemptsPerTask;
-  if (fromTask != null && fromAgent != null) {
-    return Math.min(fromTask, fromAgent);
-  }
-  return fromTask ?? fromAgent ?? 3;
+  const computed = fromTask != null && fromAgent != null ? Math.min(fromTask, fromAgent) : fromTask ?? fromAgent ?? 3;
+  // Guard against a 0/negative/NaN task.maxAttempts: the bounded `for` loop
+  // below never runs in that case, which would silently produce an
+  // instant "exhausted" outcome with zero attempts spent.
+  return Number.isFinite(computed) && computed >= 1 ? computed : 1;
 }
 
 function synthesizeTransportDecision(task, attempt, maxAttempts, workerResult) {
@@ -176,7 +184,7 @@ function synthesizeExhaustedDecision(task, maxAttempts) {
  *   task: object,
  *   agent: object,
  *   workerRuntime: { execute: Function },
- *   reviewFn: (task: object, attempt: number, workerResult: object) => Promise<object>,
+ *   reviewFn: (task: object, attempt: number, workerResult: object, options: { maxAttempts: number }) => Promise<object>,
  *   buildWorkerContext: (task: object, agent: object, feedback: object[]) => object,
  *   guards?: { beforeWorkerCall?: Function, beforeManagerCall?: Function },
  *   audit?: typeof appendAuditEvent
@@ -244,10 +252,32 @@ export async function runReviewLoop(
         return finish("halted", attempt, { reason: error.message });
       }
 
-      decision = await reviewFn(task, attempt, workerResult);
-      const { valid, errors } = validateAgainstSchema(decision, reviewDecisionSchema);
-      if (!valid) {
-        throw new Error(`Invalid review decision:\n${errors.join("\n")}`);
+      // reviewFn (and the defensive re-validation below) is NOT allowed to
+      // let an exception escape: `createCodexReviewer` is designed to throw
+      // on a manager runtime failure or twice-invalid output, and that is a
+      // real, expected failure path. Every return path must be audited, so
+      // any failure here is caught, audited (`review_failed` then
+      // `loop_halted`/`loop_finished`), and turned into a "halted" result
+      // instead of an unhandled rejection — mirroring how the guard-throw
+      // paths above finalize.
+      try {
+        decision = await reviewFn(task, attempt, workerResult, { maxAttempts });
+        const { valid, errors } = validateAgainstSchema(decision, reviewDecisionSchema);
+        if (!valid) {
+          throw new Error(`Invalid review decision:\n${errors.join("\n")}`);
+        }
+        if (decision.taskId !== task.taskId) {
+          throw new Error(`decision taskId mismatch: expected ${task.taskId}, got ${decision.taskId}`);
+        }
+      } catch (error) {
+        audit(rootDir, campaignId, {
+          event: "review_failed",
+          taskId: task.taskId,
+          attempt,
+          error: error.message
+        });
+        audit(rootDir, campaignId, { event: "loop_halted", taskId: task.taskId, attempt, reason: error.message });
+        return finish("halted", attempt, { reason: error.message });
       }
 
       audit(rootDir, campaignId, {

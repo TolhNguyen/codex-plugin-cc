@@ -372,8 +372,10 @@ test("runReviewLoop: guards.beforeManagerCall throwing halts the loop after the 
   });
 });
 
-// 7. reviewFn returning a schema-invalid decision throws (defensive re-check).
-test("runReviewLoop: throws if reviewFn returns a schema-invalid decision", async () => {
+// 7. reviewFn returning a schema-invalid decision halts the loop (defensive
+// re-check) instead of throwing, so the failure is audited like every other
+// return path.
+test("runReviewLoop: a schema-invalid decision from reviewFn halts the loop and audits review_failed", async () => {
   await withTempDir(async (rootDir) => {
     const task = makeTask();
     const agent = makeAgent();
@@ -384,18 +386,138 @@ test("runReviewLoop: throws if reviewFn returns a schema-invalid decision", asyn
     const reviewFn = makeScriptedReviewFn([badDecision]);
     const buildWorkerContext = () => ({});
 
-    await assert.rejects(
-      () =>
-        runReviewLoop(rootDir, {
-          campaignId: "camp-1",
-          task,
-          agent,
-          workerRuntime,
-          reviewFn,
-          buildWorkerContext
-        }),
-      /feedback/
-    );
+    const result = await runReviewLoop(rootDir, {
+      campaignId: "camp-1",
+      task,
+      agent,
+      workerRuntime,
+      reviewFn,
+      buildWorkerContext
+    });
+
+    assert.equal(result.outcome, "halted");
+    assert.match(result.reason, /feedback/);
+
+    const events = readAuditEvents(rootDir, "camp-1");
+    const failedEvent = events.find((event) => event.event === "review_failed");
+    assert.ok(failedEvent, "expected a review_failed audit event");
+    assert.equal(failedEvent.taskId, task.taskId);
+    assert.equal(failedEvent.attempt, 1);
+    assert.match(failedEvent.error, /feedback/);
+    assert.ok(events.some((event) => event.event === "loop_halted"));
+    assert.equal(events.at(-1).event, "loop_finished");
+    assert.equal(events.at(-1).outcome, "halted");
+  });
+});
+
+// 7b. An uncaught reviewFn throw (e.g. manager runtime failure surfaced by
+// createCodexReviewer) must still leave a full audit trail and resolve
+// (never reject) with outcome "halted".
+test("runReviewLoop: reviewFn throwing (manager runtime failure) halts the loop and audits review_failed", async () => {
+  await withTempDir(async (rootDir) => {
+    const task = makeTask();
+    const agent = makeAgent();
+    const wr1 = makeWorkerResult("completed");
+
+    const workerRuntime = makeScriptedWorkerRuntime([wr1]);
+    const reviewFn = async () => {
+      throw new Error("Manager review failed: codex crashed");
+    };
+    const buildWorkerContext = () => ({});
+
+    const result = await runReviewLoop(rootDir, {
+      campaignId: "camp-1",
+      task,
+      agent,
+      workerRuntime,
+      reviewFn,
+      buildWorkerContext
+    });
+
+    assert.equal(result.outcome, "halted");
+    assert.match(result.reason, /Manager review failed: codex crashed/);
+
+    const events = readAuditEvents(rootDir, "camp-1");
+    const failedEvent = events.find((event) => event.event === "review_failed");
+    assert.ok(failedEvent, "expected a review_failed audit event");
+    assert.equal(failedEvent.taskId, task.taskId);
+    assert.equal(failedEvent.attempt, 1);
+    assert.match(failedEvent.error, /Manager review failed: codex crashed/);
+    assert.ok(events.some((event) => event.event === "loop_halted"));
+    assert.equal(events.at(-1).event, "loop_finished");
+    assert.equal(events.at(-1).outcome, "halted");
+  });
+});
+
+// 7c. decision.taskId must match task.taskId; a mismatch is a
+// manager-integrity failure routed through the same halt handling.
+test("runReviewLoop: a decision with a mismatched taskId halts as a manager-integrity failure", async () => {
+  await withTempDir(async (rootDir) => {
+    const task = makeTask();
+    const agent = makeAgent();
+    const wr1 = makeWorkerResult("completed");
+    const mismatched = {
+      taskId: "some-other-task",
+      decision: "approve",
+      feedback: [],
+      nextAttempt: 2,
+      maxAttempts: 3
+    };
+
+    const workerRuntime = makeScriptedWorkerRuntime([wr1]);
+    const reviewFn = makeScriptedReviewFn([mismatched]);
+    const buildWorkerContext = () => ({});
+
+    const result = await runReviewLoop(rootDir, {
+      campaignId: "camp-1",
+      task,
+      agent,
+      workerRuntime,
+      reviewFn,
+      buildWorkerContext
+    });
+
+    assert.equal(result.outcome, "halted");
+    assert.match(result.reason, /decision taskId mismatch: expected task-1, got some-other-task/);
+
+    const events = readAuditEvents(rootDir, "camp-1");
+    const failedEvent = events.find((event) => event.event === "review_failed");
+    assert.ok(failedEvent, "expected a review_failed audit event");
+    assert.match(failedEvent.error, /decision taskId mismatch: expected task-1, got some-other-task/);
+    assert.ok(events.some((event) => event.event === "loop_halted"));
+    assert.equal(events.at(-1).event, "loop_finished");
+    assert.equal(events.at(-1).outcome, "halted");
+  });
+});
+
+// 7d. The loop must pass its effective (agent-capped) maxAttempts into
+// reviewFn so the manager sees the real budget, not the raw task field.
+test("runReviewLoop: passes the capped maxAttempts to reviewFn as the 4th argument", async () => {
+  await withTempDir(async (rootDir) => {
+    const task = makeTask({ maxAttempts: 5 });
+    const agent = makeAgent({ limits: { maxAttemptsPerTask: 2, maxExecutionMinutes: 20, maxToolCalls: 40 } });
+    const wr1 = makeWorkerResult("completed");
+    const decision = { taskId: task.taskId, decision: "approve", feedback: [], nextAttempt: 2, maxAttempts: 2 };
+
+    const workerRuntime = makeScriptedWorkerRuntime([wr1]);
+    const seenOptions = [];
+    const reviewFn = async (t, attempt, workerResult, options) => {
+      seenOptions.push(options);
+      return decision;
+    };
+    const buildWorkerContext = () => ({});
+
+    await runReviewLoop(rootDir, {
+      campaignId: "camp-1",
+      task,
+      agent,
+      workerRuntime,
+      reviewFn,
+      buildWorkerContext
+    });
+
+    assert.equal(seenOptions.length, 1);
+    assert.equal(seenOptions[0].maxAttempts, 2);
   });
 });
 
@@ -507,5 +629,48 @@ test("createCodexReviewer: throws 'Manager review failed' when the runtime does 
     const reviewFn = createCodexReviewer({ rootDir, runtime, managerAgent: { id: "manager-codex" } });
 
     await assert.rejects(() => reviewFn(task, 1, workerResult), /Manager review failed: codex crashed/);
+  });
+});
+
+test("createCodexReviewer: uses the capped maxAttempts passed via the 4th argument for the prompt, not task.maxAttempts", async () => {
+  await withTempDir(async (rootDir) => {
+    const task = makeTask({ maxAttempts: 5 });
+    const workerResult = makeWorkerResult("completed", { output: JSON.stringify({ ok: true }) });
+    const decision = { taskId: task.taskId, decision: "approve", feedback: [], nextAttempt: 3, maxAttempts: 2 };
+
+    const calls = [];
+    const runtime = {
+      execute: async (agent, t, context) => {
+        calls.push({ agent, task: t, context });
+        return makeManagerResult({ output: JSON.stringify(decision) });
+      }
+    };
+
+    const reviewFn = createCodexReviewer({ rootDir, runtime, managerAgent: { id: "manager-codex" } });
+    const result = await reviewFn(task, 2, workerResult, { maxAttempts: 2 });
+
+    assert.deepEqual(result, decision);
+    assert.match(calls[0].context.prompt, /is attempt 2 of 2/);
+  });
+});
+
+test("createCodexReviewer: falls back to task.maxAttempts when no options are passed (backward compatible)", async () => {
+  await withTempDir(async (rootDir) => {
+    const task = makeTask({ maxAttempts: 5 });
+    const workerResult = makeWorkerResult("completed", { output: JSON.stringify({ ok: true }) });
+    const decision = { taskId: task.taskId, decision: "approve", feedback: [], nextAttempt: 2, maxAttempts: 5 };
+
+    const calls = [];
+    const runtime = {
+      execute: async (agent, t, context) => {
+        calls.push({ agent, task: t, context });
+        return makeManagerResult({ output: JSON.stringify(decision) });
+      }
+    };
+
+    const reviewFn = createCodexReviewer({ rootDir, runtime, managerAgent: { id: "manager-codex" } });
+    await reviewFn(task, 1, workerResult);
+
+    assert.match(calls[0].context.prompt, /is attempt 1 of 5/);
   });
 });
