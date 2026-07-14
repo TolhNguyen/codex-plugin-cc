@@ -75,6 +75,7 @@ test("continue is not exposed as a user-facing command", () => {
   assert.deepEqual(commandFiles, [
     "adversarial-review.md",
     "bootstrap-agents.md",
+    "campaign.md",
     "cancel.md",
     "rescue.md",
     "result.md",
