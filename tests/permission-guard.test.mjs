@@ -144,8 +144,41 @@ test("guard: .ai-company/** is always write-denied even when globs allow everyth
       () => guard.assertWrite(".ai-company/agents/x.json"),
       /Permission denied: write/
     );
-    // reading is unaffected by the always-write-denied rule
-    assert.equal(guard.canRead(".ai-company/agents/x.json"), true);
+    // .ai-company is ALSO always read-denied (governance store isolation) —
+    // see the dedicated read-deny tests below.
+    assert.equal(guard.canRead(".ai-company/agents/x.json"), false);
+  });
+});
+
+test("guard: .ai-company is always read-denied even when read globs allow everything", () => {
+  withTempDir((rootDir) => {
+    fs.mkdirSync(path.join(rootDir, ".ai-company", "memory", "shared"), { recursive: true });
+    fs.mkdirSync(path.join(rootDir, "src"), { recursive: true });
+    fs.mkdirSync(path.join(rootDir, "tests"), { recursive: true });
+    const guard = createPermissionGuard(rootDir, { read: ["**"], write: ["**"] });
+
+    assert.equal(guard.canRead(".ai-company/memory/shared/x.json"), false);
+    assert.throws(
+      () => guard.assertRead(".ai-company/memory/shared/x.json"),
+      /Permission denied: read/
+    );
+
+    // dot-relative form
+    assert.equal(guard.canRead("./.ai-company/x"), false);
+    assert.throws(() => guard.assertRead("./.ai-company/x"), /Permission denied: read/);
+
+    // traversal form that resolves into .ai-company
+    assert.equal(guard.canRead("tests/../.ai-company/x"), false);
+    assert.throws(() => guard.assertRead("tests/../.ai-company/x"), /Permission denied: read/);
+
+    // bare ".ai-company" segment itself
+    assert.equal(guard.canRead(".ai-company"), false);
+    assert.throws(() => guard.assertRead(".ai-company"), /Permission denied: read/);
+
+    // .git is NOT read-denied (only .ai-company is the governance store)
+    // normal reads elsewhere in the repo still work under the same grant
+    assert.equal(guard.canRead("src/x.mjs"), true);
+    assert.equal(guard.canRead("tests/y.mjs"), true);
   });
 });
 

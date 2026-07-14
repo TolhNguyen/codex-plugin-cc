@@ -9,6 +9,12 @@ import path from "node:path";
 
 const ALWAYS_WRITE_DENIED_GLOBS = [".ai-company", ".ai-company/**", ".git", ".git/**"];
 
+// The governance store must never be readable through a worker's granted
+// read globs, even a broad one like "**" — it holds other agents' memory
+// namespaces, agent/skill/proposal state, etc. Unlike writes, `.git` is NOT
+// read-denied here: reading a repo's own git-tracked files is normal.
+const ALWAYS_READ_DENIED_GLOBS = [".ai-company", ".ai-company/**"];
+
 function isWin32() {
   return process.platform === "win32";
 }
@@ -150,6 +156,11 @@ function isAlwaysWriteDenied(relPath) {
   return ALWAYS_WRITE_DENIED_GLOBS.some((glob) => matchGlob(glob, normalized));
 }
 
+function isAlwaysReadDenied(relPath) {
+  const normalized = toPosixRelative(relPath);
+  return ALWAYS_READ_DENIED_GLOBS.some((glob) => matchGlob(glob, normalized));
+}
+
 function matchesAny(globs, relPath) {
   const normalized = toPosixRelative(relPath);
   return globs.some((glob) => matchGlob(glob, normalized));
@@ -168,6 +179,9 @@ export function createPermissionGuard(rootDir, permissions) {
       return false;
     }
     const canonicalRelPath = toCanonicalRelative(rootDir, resolved);
+    if (isAlwaysReadDenied(canonicalRelPath)) {
+      return false;
+    }
     return matchesAny(readGlobs, canonicalRelPath);
   }
 
@@ -188,7 +202,7 @@ export function createPermissionGuard(rootDir, permissions) {
   function assertRead(relPath) {
     const resolved = resolveAndCheckContainment(rootDir, canonicalRootDir, relPath);
     const canonicalRelPath = toCanonicalRelative(rootDir, resolved);
-    if (!matchesAny(readGlobs, canonicalRelPath)) {
+    if (isAlwaysReadDenied(canonicalRelPath) || !matchesAny(readGlobs, canonicalRelPath)) {
       throw new Error(`Permission denied: read ${relPath}`);
     }
     return resolved;
