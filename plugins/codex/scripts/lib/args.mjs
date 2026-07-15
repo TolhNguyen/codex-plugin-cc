@@ -73,6 +73,29 @@ export function parseArgs(argv, config = {}) {
   return { options, positionals };
 }
 
+/**
+ * Normalizes a raw argv array that may have arrived as ONE shell token
+ * containing the entire flag string — the shape `$ARGUMENTS` takes when a
+ * command markdown file forwards it quoted (e.g. `bootstrap "$ARGUMENTS"`).
+ * When `argv` has exactly one element, it is split with
+ * `splitRawArgumentString`; otherwise it is returned unchanged (already
+ * tokenized argv, e.g. from tests calling the CLI with separate array
+ * elements, must never be re-split).
+ *
+ * @param {string[]} argv
+ * @returns {string[]}
+ */
+export function normalizeArgv(argv) {
+  if (argv.length === 1) {
+    const [raw] = argv;
+    if (!raw || !raw.trim()) {
+      return [];
+    }
+    return splitRawArgumentString(raw);
+  }
+  return argv;
+}
+
 export function splitRawArgumentString(raw) {
   const tokens = [];
   let current = "";
