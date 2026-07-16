@@ -33,8 +33,15 @@ function buildCorrectionPrompt(prompt, errors) {
   return `${prompt}\n\n## Correction required\nThe previous response failed validation with these errors:\n${errorList}\n\nReturn ONLY corrected JSON matching the schema.`;
 }
 
-function tryParseAndValidate(finalMessage, schema) {
-  const { parsed, parseError } = parseStructuredOutput(finalMessage);
+function tryParseAndValidate(attempt, schema) {
+  // A failed turn (e.g. the backend rejecting the request before the model
+  // runs) has no final message; surface the real turn error instead of a
+  // generic parse failure.
+  if (!attempt.finalMessage && attempt.error?.message) {
+    return { ok: false, errors: [`Codex turn failed: ${attempt.error.message}`] };
+  }
+
+  const { parsed, parseError } = parseStructuredOutput(attempt.finalMessage);
   if (!parsed) {
     return { ok: false, errors: [parseError ?? "Codex did not return a parseable JSON message."] };
   }
@@ -59,7 +66,7 @@ export async function proposeTopology(rootDir, { profile, runTurn = runAppServer
     onProgress
   });
 
-  const firstResult = tryParseAndValidate(firstAttempt.finalMessage, schema);
+  const firstResult = tryParseAndValidate(firstAttempt, schema);
   if (firstResult.ok) {
     return { proposal: firstResult.value, threadId: firstAttempt.threadId };
   }
@@ -72,7 +79,7 @@ export async function proposeTopology(rootDir, { profile, runTurn = runAppServer
     onProgress
   });
 
-  const secondResult = tryParseAndValidate(secondAttempt.finalMessage, schema);
+  const secondResult = tryParseAndValidate(secondAttempt, schema);
   if (secondResult.ok) {
     return { proposal: secondResult.value, threadId: secondAttempt.threadId };
   }

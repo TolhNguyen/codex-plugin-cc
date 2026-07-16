@@ -337,3 +337,86 @@ test("orchestration-cli approve-topology invoked as ONE quoted argument string s
     fs.rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+// 7. A failed Codex turn must surface the real turn error, not the generic
+// "did not return a final structured message". This is exactly what hid the
+// 400 invalid_json_schema rejection during real bootstrap runs.
+test("proposeTopology: surfaces the Codex turn error when the turn fails without a final message", async () => {
+  await withTempDir(async (rootDir) => {
+    const profile = analyzeRepository(rootDir);
+    const stub = async () => ({
+      status: 1,
+      finalMessage: "",
+      threadId: "t1",
+      error: { message: "invalid_json_schema: 'required' must include every key in properties." }
+    });
+
+    await assert.rejects(
+      () => proposeTopology(rootDir, { profile, runTurn: stub }),
+      (error) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /invalid_json_schema/);
+        return true;
+      }
+    );
+  });
+});
+
+// 8. End-to-end wiring: the outputSchema actually sent over the app-server
+// protocol must be strict-compliant (every object node lists all property
+// keys in `required`), otherwise the OpenAI backend rejects the turn with
+// 400 invalid_json_schema before the model ever runs.
+test("orchestration-cli bootstrap sends a strict-compliant outputSchema to Codex", () => {
+  const rootDir = makeTempDir("topology-planner-cli-strict-");
+  const binDir = makeTempDir("topology-planner-cli-strict-bin-");
+  installFakeCodex(binDir);
+  try {
+    // The fake codex replies with a non-JSON task payload, so bootstrap is
+    // expected to fail validation — this test only cares about what schema
+    // was sent in turn/start.
+    run("node", [CLI, "bootstrap", "--cwd", rootDir, "--json"], {
+      cwd: ROOT,
+      env: buildEnv(binDir)
+    });
+
+    const statePath = path.join(binDir, "fake-codex-state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    const sentSchema = state.lastTurnStart.outputSchema;
+    assert.ok(sentSchema, "turn/start did not carry an outputSchema");
+
+    const issues = [];
+    (function walk(node, ctx) {
+      if (!node || typeof node !== "object" || Array.isArray(node)) {
+        return;
+      }
+      if (node.type === "object" && node.properties) {
+        const required = new Set(node.required ?? []);
+        const missing = Object.keys(node.properties).filter((key) => !required.has(key));
+        if (missing.length > 0) {
+          issues.push(`${ctx}: missing from required: ${missing.join(", ")}`);
+        }
+        if (node.additionalProperties !== false) {
+          issues.push(`${ctx}: additionalProperties is not false`);
+        }
+      }
+      for (const [key, value] of Object.entries(node)) {
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          walk(value, `${ctx}.${key}`);
+        }
+      }
+    })(sentSchema, "$");
+
+    assert.deepEqual(issues, []);
+  } finally {
+    // The fake codex app-server can outlive the CLI on Windows and hold these
+    // directories open (its cwd is rootDir); cleanup is best-effort so a
+    // lingering child process cannot fail an otherwise-passing test.
+    for (const dir of [rootDir, binDir]) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      } catch {
+        // Leave the temp directory behind rather than failing the test.
+      }
+    }
+  }
+});

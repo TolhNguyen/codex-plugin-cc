@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   loadOrchestrationSchema,
+  toStrictOutputSchema,
   validateAgainstSchema
 } from "../plugins/codex/scripts/lib/schema-validator.mjs";
 
@@ -161,5 +162,51 @@ for (const name of SCHEMA_NAMES) {
 
     assert.equal(typeof schema, "object");
     assert.equal(JSON.stringify(schema).includes("$ref"), false);
+  });
+}
+
+// --- strict output-schema compliance ---------------------------------------
+// These schemas are handed to a model as `outputSchema`. The OpenAI API
+// rejects any strict output schema whose object nodes do not list EVERY
+// property key in `required` (observed as a 400 `invalid_json_schema`
+// during `orchestration-cli bootstrap`). `toStrictOutputSchema` must turn
+// each of them into a compliant schema.
+
+const MODEL_FACING_SCHEMA_NAMES = [
+  "topology-proposal",
+  "memory-decision",
+  "review-decision",
+  "task-result"
+];
+
+function collectStrictViolations(node, ctx, issues) {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    return;
+  }
+  if (node.type === "object" && node.properties) {
+    const keys = Object.keys(node.properties);
+    const required = new Set(node.required ?? []);
+    const missing = keys.filter((key) => !required.has(key));
+    if (missing.length > 0) {
+      issues.push(`${ctx}: missing from required: ${missing.join(", ")}`);
+    }
+    if (node.additionalProperties !== false) {
+      issues.push(`${ctx}: additionalProperties is not false`);
+    }
+  }
+  for (const [key, value] of Object.entries(node)) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      collectStrictViolations(value, `${ctx}.${key}`, issues);
+    }
+  }
+}
+
+for (const name of MODEL_FACING_SCHEMA_NAMES) {
+  test(`${name} schema: toStrictOutputSchema output satisfies strict structured-output rules`, () => {
+    const strict = toStrictOutputSchema(loadOrchestrationSchema(name));
+    const issues = [];
+    collectStrictViolations(strict, "$", issues);
+
+    assert.deepEqual(issues, []);
   });
 }

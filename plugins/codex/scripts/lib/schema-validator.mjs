@@ -108,6 +108,43 @@ export function validateAgainstSchema(value, schema) {
   return { valid: errors.length === 0, errors };
 }
 
+/**
+ * Return a copy of `schema` that satisfies the OpenAI strict
+ * structured-output rules: every object node that declares `properties`
+ * must list EVERY property key in `required` and set
+ * `additionalProperties: false`. Schemas passed to a model as an output
+ * schema MUST go through this transform, otherwise the API rejects the
+ * turn with 400 `invalid_json_schema` before the model runs. The original
+ * (lenient) schema stays valid for local document validation, where
+ * optional fields remain optional.
+ */
+export function toStrictOutputSchema(schema) {
+  if (!isPlainObject(schema)) {
+    return schema;
+  }
+
+  const copy = {};
+  for (const [key, value] of Object.entries(schema)) {
+    copy[key] = isPlainObject(value) || Array.isArray(value) ? structuredClone(value) : value;
+  }
+
+  if (copy.type === "object" && isPlainObject(copy.properties)) {
+    const strictProperties = {};
+    for (const [key, value] of Object.entries(copy.properties)) {
+      strictProperties[key] = toStrictOutputSchema(value);
+    }
+    copy.properties = strictProperties;
+    copy.required = Object.keys(strictProperties);
+    copy.additionalProperties = false;
+  }
+
+  if (isPlainObject(copy.items)) {
+    copy.items = toStrictOutputSchema(copy.items);
+  }
+
+  return copy;
+}
+
 export function loadOrchestrationSchema(name) {
   const url = new URL(`../../schemas/orchestration/${name}.schema.json`, import.meta.url);
   const filePath = fileURLToPath(url);

@@ -40,6 +40,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { readJsonFile } from "./fs.mjs";
+import { toStrictOutputSchema } from "./schema-validator.mjs";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable } from "./process.mjs";
@@ -1138,7 +1139,9 @@ export async function runAppServerTurn(cwd, options = {}) {
           input: buildTurnInput(prompt),
           model: options.model ?? null,
           effort: options.effort ?? null,
-          outputSchema: options.outputSchema ?? null
+          // The backend enforces strict structured-output rules on this
+          // schema; a lenient schema is rejected with 400 invalid_json_schema.
+          outputSchema: options.outputSchema ? toStrictOutputSchema(options.outputSchema) : null
         }),
       { onProgress: options.onProgress }
     );

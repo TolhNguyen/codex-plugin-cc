@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   loadOrchestrationSchema,
+  toStrictOutputSchema,
   validateAgainstSchema
 } from "../plugins/codex/scripts/lib/schema-validator.mjs";
 
@@ -218,4 +219,63 @@ test("loadOrchestrationSchema throws a clear error naming the missing file", () 
     () => loadOrchestrationSchema("does-not-exist"),
     /does-not-exist/
   );
+});
+
+// --- toStrictOutputSchema -----------------------------------------------
+// Schemas sent to a model as an output schema must satisfy the OpenAI
+// strict-structured-output rules: every object node that declares
+// `properties` must list EVERY property key in `required` and must set
+// `additionalProperties: false`. See the real API rejection this guards
+// against: "Invalid schema for response_format 'codex_output_schema':
+// 'required' is required to be supplied and to be an array including
+// every key in properties."
+
+test("toStrictOutputSchema adds every property key to required, recursively", () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["kept"],
+    properties: {
+      kept: { type: "string" },
+      optionalNote: { type: "string" },
+      children: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["id"],
+          properties: {
+            id: { type: "string" },
+            optionalTags: { type: "array", items: { type: "string" } }
+          }
+        }
+      }
+    }
+  };
+
+  const strict = toStrictOutputSchema(schema);
+
+  assert.deepEqual([...strict.required].sort(), ["children", "kept", "optionalNote"]);
+  assert.equal(strict.additionalProperties, false);
+  assert.deepEqual([...strict.properties.children.items.required].sort(), ["id", "optionalTags"]);
+  assert.equal(strict.properties.children.items.additionalProperties, false);
+});
+
+test("toStrictOutputSchema does not mutate the input schema", () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["a"],
+    properties: { a: { type: "string" }, b: { type: "string" } }
+  };
+  const before = JSON.stringify(schema);
+
+  toStrictOutputSchema(schema);
+
+  assert.equal(JSON.stringify(schema), before);
+});
+
+test("toStrictOutputSchema leaves non-object nodes untouched", () => {
+  const schema = { type: "array", items: { type: "string" } };
+
+  assert.deepEqual(toStrictOutputSchema(schema), schema);
 });
