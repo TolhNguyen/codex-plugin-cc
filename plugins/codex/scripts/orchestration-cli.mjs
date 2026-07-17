@@ -19,9 +19,10 @@ import {
 } from "./orchestration/campaign-orchestrator.mjs";
 import { appendAuditEvent } from "./orchestration/audit-log.mjs";
 import { createBudget } from "./orchestration/budget.mjs";
+import { createCodexPlanDecomposer, runPlanDecomposition } from "./orchestration/plan-decomposer.mjs";
 import { listProposals } from "./memory/proposal-store.mjs";
 import { createMemoryReviewer, reviewPendingProposals } from "./memory/memory-review.mjs";
-import { loadAgent } from "./agents/agent-registry.mjs";
+import { loadAgent, listAgents } from "./agents/agent-registry.mjs";
 import { createCodexRuntime } from "./runtimes/codex-runtime.mjs";
 import { listSkills, loadSkill, setSkillStatus } from "./skills/skill-registry.mjs";
 import { runDoctor, renderDoctorReport } from "./orchestration/doctor.mjs";
@@ -40,6 +41,8 @@ function printUsage() {
       "  node scripts/orchestration-cli.mjs campaign show <campaignId> [--cwd <path>] [--json]",
       "  node scripts/orchestration-cli.mjs campaign run-task <campaignId> --task-file <path.json>",
       "      [--manager-agent <id>] [--cwd <path>] [--json]",
+      "  node scripts/orchestration-cli.mjs campaign plan-to-tasks <campaignId> --plan-file <path.md>",
+      "      [--run] [--manager-agent <id>] [--out <dir>] [--cwd <path>] [--json]",
       "  node scripts/orchestration-cli.mjs campaign approve --approved-by <role> <campaignId> [--cwd <path>] [--json]",
       "  node scripts/orchestration-cli.mjs campaign review-proposals <campaignId> --decided-by <role> [--cwd <path>] [--json]",
       "  node scripts/orchestration-cli.mjs campaign accept <campaignId> --accepted-by <role> [--cwd <path>] [--json]",
@@ -502,6 +505,159 @@ async function handleCampaignAccept(argv) {
   outputResult(options.json ? updated : renderCampaignReport(updated), options.json);
 }
 
+/**
+ * Active skills that at least one active agent actually holds — the only refs
+ * the decomposer may put in a task's `requiredSkills` without making it
+ * unroutable (mirrors `routeTask`'s active+held gate).
+ */
+function buildSkillCatalog(cwd) {
+  const activeSkills = listSkills(cwd, { status: "active" });
+  const activeAgents = listAgents(cwd).filter((agent) => agent.status === "active");
+  const catalog = [];
+  for (const skill of activeSkills) {
+    const ref = `${skill.id}@${skill.version}`;
+    const heldBy = activeAgents
+      .filter((agent) => Array.isArray(agent.skills) && agent.skills.includes(ref))
+      .map((agent) => agent.id);
+    if (heldBy.length > 0) {
+      catalog.push({ ref, purpose: skill.purpose, heldBy });
+    }
+  }
+  return catalog;
+}
+
+async function handleCampaignPlanToTasks(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "plan-file", "manager-agent", "out"],
+    booleanOptions: ["json", "run"]
+  });
+  const campaignId = positionals[0];
+  if (!campaignId) {
+    throw new Error("Missing required <campaignId>.");
+  }
+  if (!options["plan-file"]) {
+    throw new Error("Missing required --plan-file <path.md>.");
+  }
+
+  const cwd = resolveCommandCwd(options);
+  const campaign = requireCampaign(cwd, campaignId);
+
+  // Fail fast: refuse --run against a campaign that cannot execute, BEFORE
+  // spending a manager call on decomposition.
+  if (options.run && campaign.status !== "running") {
+    throw new Error(
+      `--run requires the campaign to be running (it is "${campaign.status}"). Approve it first, then re-run.`
+    );
+  }
+
+  const planPath = ensureAbsolutePath(cwd, options["plan-file"]);
+  if (!fs.existsSync(planPath)) {
+    throw new Error(`Plan file not found: ${planPath}`);
+  }
+  const planText = fs.readFileSync(planPath, "utf8");
+
+  const profilePath = path.join(cwd, ".ai-company", "project-profile.json");
+  const projectProfile = fs.existsSync(profilePath) ? readJsonFile(profilePath) : null;
+  const skillCatalog = buildSkillCatalog(cwd);
+
+  const managerAgentId = options["manager-agent"] ?? "manager-codex";
+  const managerAgent = loadAgent(cwd, managerAgentId) ?? {
+    id: managerAgentId,
+    name: managerAgentId,
+    runtime: { provider: "codex", model: null }
+  };
+  const runtime = createCodexRuntime({ rootDir: cwd });
+  const decomposeFn = createCodexPlanDecomposer({ rootDir: cwd, runtime, managerAgent });
+
+  const budget = createBudget(campaign);
+  const outDir = options.out ? ensureAbsolutePath(cwd, options.out) : null;
+
+  let decomposition;
+  try {
+    decomposition = await runPlanDecomposition(cwd, {
+      campaign,
+      planText,
+      projectProfile,
+      skillCatalog,
+      decomposeFn,
+      guards: { beforeManagerCall: () => budget.guards.beforeManagerCall() },
+      outDir
+    });
+  } catch (error) {
+    if (/Budget exhausted/.test(error.message)) {
+      try {
+        setCampaignStatus(cwd, campaignId, "paused");
+      } catch {
+        // Not in a state from which "paused" is a legal transition; the audit
+        // event below still records why.
+      }
+      appendAuditEvent(cwd, campaignId, {
+        event: "campaign_paused_budget",
+        reason: "plan-to-tasks budget exhausted"
+      });
+      outputResult(`Halted: ${error.message}\nThe campaign has been paused on budget exhaustion.\n`, false);
+      return;
+    }
+    throw error;
+  }
+
+  // `budget` mutated `campaign.usage` in place as the guard ran; persist it.
+  saveCampaign(cwd, campaign);
+
+  const runResults = [];
+  let halted = false;
+  if (options.run) {
+    for (const task of decomposition.runReady) {
+      const result = await runCampaignTask(cwd, { campaign, task, managerAgent, lint: { enforce: true } });
+      runResults.push({ taskId: task.taskId, outcome: result.loop.outcome });
+      if (result.loop.outcome === "halted") {
+        halted = true;
+        break;
+      }
+    }
+  }
+
+  if (options.json) {
+    outputResult({ manifest: decomposition.manifest, runResults, halted }, true);
+    return;
+  }
+
+  const summary = decomposition.manifest.summary;
+  const lines = [
+    `Decomposed plan into ${summary.total} task(s): ${summary.runReady} run-ready, ` +
+      `${summary.needsAttention} needs-attention, ${summary.expensiveTier} kept in expensive tier.`,
+    `Drafts + manifest written under ${path.relative(cwd, decomposition.outDir)}/`,
+    ""
+  ];
+  for (const task of decomposition.tasks) {
+    if (task.bucket === "run-ready") {
+      lines.push(`- [run-ready] ${task.taskId} (${task.tier}) -> ${task.file}`);
+    } else if (task.bucket === "needs-attention") {
+      const reasons = [
+        task.lint.errorCodes.length ? `lint: ${task.lint.errorCodes.join(",")}` : "",
+        task.skillGap.length ? `unroutable skills: ${task.skillGap.join(",")}` : ""
+      ].filter(Boolean);
+      lines.push(`- [needs-attention] ${task.taskId} (${task.tier}) ${reasons.join("; ")}`);
+    } else {
+      lines.push(`- [expensive-tier: ${task.tier}] ${task.taskId} — ${task.tierRationale}`);
+    }
+  }
+  const firstRunReady = decomposition.tasks.find((task) => task.bucket === "run-ready");
+  if (firstRunReady && !options.run) {
+    lines.push("", "Run a draft with:", `  campaign run-task ${campaignId} --task-file ${firstRunReady.file}`);
+  }
+  if (options.run) {
+    lines.push("", "Execution:");
+    for (const result of runResults) {
+      lines.push(`- ${result.taskId}: ${result.outcome}`);
+    }
+    if (halted) {
+      lines.push("The campaign has been paused on budget exhaustion.");
+    }
+  }
+  outputResult(`${lines.join("\n")}\n`, false);
+}
+
 async function handleCampaign(argv) {
   const [action, ...rest] = argv;
   switch (action) {
@@ -516,6 +672,9 @@ async function handleCampaign(argv) {
       break;
     case "run-task":
       await handleCampaignRunTask(rest);
+      break;
+    case "plan-to-tasks":
+      await handleCampaignPlanToTasks(rest);
       break;
     case "approve":
       await handleCampaignApprove(rest);

@@ -92,9 +92,26 @@ Commands (all under `node plugins/codex/scripts/orchestration-cli.mjs`):
 1. `bootstrap` — analyze repo, propose topology (first time only).
 2. `campaign create --brief "..." --criteria "..." [--json]`
 3. `campaign approve <campaignId> --approved-by <role>`
-4. `campaign run-task <campaignId> --task-file <task.json> [--no-lint] [--json]`
-5. `campaign show <campaignId>` — status, tasks, pending proposals.
-6. `campaign review-proposals <campaignId> --decided-by <role>` — manager decides memory writes.
+4. `campaign plan-to-tasks <campaignId> --plan-file <plan.md> [--run] [--out <dir>]` — decompose a
+   written plan into tier-classified task drafts (§4 authoring done for you by the manager tier).
+5. `campaign run-task <campaignId> --task-file <task.json> [--no-lint] [--json]`
+6. `campaign show <campaignId>` — status, tasks, pending proposals.
+7. `campaign review-proposals <campaignId> --decided-by <role>` — manager decides memory writes.
+
+### 5a. Turning a plan into tasks (`plan-to-tasks`)
+
+Instead of hand-authoring every task JSON to §4, point `plan-to-tasks` at a plan document. One
+budget-guarded Codex manager call reads the plan and classifies each unit of work into a tier:
+
+- `worker` + lint-pass + routable skills → a **run-ready** draft written to
+  `.ai-company/campaigns/<id>/drafts/<taskId>.json`.
+- `worker` but lint-failing or naming an unroutable skill → **needs-attention** (written, flagged).
+- `manager` / `executive` → **kept in the expensive tier** (manifest only, never handed to a worker).
+
+Every run is summarized in `drafts/manifest.json`. Default (no `--run`) writes drafts only, so you
+review before spending; `--run` then executes the run-ready drafts through the campaign, halting on
+budget exhaustion exactly like `run-task`. This is the mechanical embodiment of §4: the manager tier
+absorbs the classification so a convention-heavy slice never reaches a cheap worker by accident.
 
 ## 6. When a task escalates
 

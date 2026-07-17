@@ -20,6 +20,8 @@ Subcommand -> CLI mapping (forward `$ARGUMENTS` after the leading verb):
 - `list` -> `... campaign list ...`
 - `show <campaignId>` -> `... campaign show ...`
 - `run-task <campaignId> --task-file <path.json>` -> `... campaign run-task ...`
+- `plan-to-tasks <campaignId> --plan-file <path.md> [--run] [--out <dir>]` ->
+  `node "${CLAUDE_PLUGIN_ROOT}/scripts/orchestration-cli.mjs" campaign plan-to-tasks ...`
 - `approve <campaignId> --approved-by <role>` -> `... campaign approve ...`
 - `review-proposals <campaignId> --decided-by <role>` -> `... campaign review-proposals ...`
 - `accept <campaignId> --accepted-by <role>` -> `... campaign accept ...`
@@ -40,6 +42,15 @@ Running a task (`run-task`) does not itself require approval to invoke, but only
 the user has asked to execute a task against an already-approved (`running`) campaign; if
 `campaign show` reports the campaign is not `running` yet, tell the user and ask whether they
 want to approve it first rather than running the task anyway.
+
+`plan-to-tasks` decomposes a plan document into tier-classified task drafts (one budget-guarded
+Codex manager call) and writes worker-tier drafts + a `manifest.json` under
+`.ai-company/campaigns/<id>/drafts/`. Without `--run` it only writes drafts and spends nothing
+beyond that single manager call — running each draft stays the separate, explicit `run-task`
+step. The `--run` flag additionally executes the run-ready worker drafts through the campaign and
+therefore spends worker/manager budget exactly like `run-task`; only pass it when the user asked
+to execute, and only against a `running` campaign (the CLI refuses `--run` otherwise). Report the
+manifest summary (run-ready / needs-attention / kept-in-expensive-tier counts) verbatim.
 
 Budget pauses: if `campaign run-task` reports outcome `halted` (or `campaign show` reports
 status `paused`), that means a budget cap was hit. Report this to the user plainly (which cap,
