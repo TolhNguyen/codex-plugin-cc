@@ -15,3 +15,5 @@ If the user did not pass a job ID:
 If the user did pass a job ID:
 - Present the full command output to the user.
 - Do not summarize or condense it.
+
+If the `node` command fails with `MODULE_NOT_FOUND` on a path containing an old plugin version (e.g. `...\codex\1.0.6\...`), the plugin was updated while this session was running — tell the user to restart the Claude Code session. Do not retry with a guessed or corrected path.

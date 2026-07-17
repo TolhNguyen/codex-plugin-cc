@@ -24,11 +24,13 @@ import { createMemoryReviewer, reviewPendingProposals } from "./memory/memory-re
 import { loadAgent } from "./agents/agent-registry.mjs";
 import { createCodexRuntime } from "./runtimes/codex-runtime.mjs";
 import { listSkills, loadSkill, setSkillStatus } from "./skills/skill-registry.mjs";
+import { runDoctor, renderDoctorReport } from "./orchestration/doctor.mjs";
 
 function printUsage() {
   console.log(
     [
       "Usage:",
+      "  node scripts/orchestration-cli.mjs doctor [--cwd <path>] [--json]",
       "  node scripts/orchestration-cli.mjs bootstrap [--cwd <path>] [--profile-only] [--json]",
       "  node scripts/orchestration-cli.mjs approve-topology --approved-by <role> [--cwd <path>] [--json]",
       "  node scripts/orchestration-cli.mjs campaign create --brief <text> [--criteria <text>]...",
@@ -623,6 +625,18 @@ async function handleApproveTopology(argv) {
   outputResult(options.json ? result : renderApproveReport(result), options.json);
 }
 
+async function handleDoctor(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const report = runDoctor(cwd);
+
+  outputResult(options.json ? report : renderDoctorReport(report), options.json);
+}
+
 async function main() {
   const [subcommand, ...rawArgv] = process.argv.slice(2);
   if (!subcommand || subcommand === "help" || subcommand === "--help") {
@@ -638,6 +652,9 @@ async function main() {
   const argv = normalizeArgv(rawArgv);
 
   switch (subcommand) {
+    case "doctor":
+      await handleDoctor(argv);
+      break;
     case "bootstrap":
       await handleBootstrap(argv);
       break;

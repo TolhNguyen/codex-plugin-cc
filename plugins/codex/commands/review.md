@@ -59,3 +59,5 @@ Bash({
 ```
 - Do not call `BashOutput` or wait for completion in this turn.
 - After launching the command, tell the user: "Codex review started in the background. Check `/codex:status` for progress."
+
+If the `node` command fails with `MODULE_NOT_FOUND` on a path containing an old plugin version (e.g. `...\codex\1.0.6\...`), the plugin was updated while this session was running — tell the user to restart the Claude Code session. Do not retry with a guessed or corrected path.

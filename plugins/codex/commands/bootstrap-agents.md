@@ -38,6 +38,15 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orchestration-cli.mjs" approve-topology "$AR
 ```
 - Return the command stdout verbatim to the user.
 
+Troubleshooting:
+- If a `node` command above fails with `MODULE_NOT_FOUND` on a path containing an old plugin
+  version (e.g. `...\codex\1.0.6\...`), the plugin was updated while this Claude Code session was
+  running. Do not retry with a guessed or corrected path — tell the user to restart the session so
+  commands resolve to the new version.
+- For any other unexpected failure, run
+  `node "${CLAUDE_PLUGIN_ROOT}/scripts/orchestration-cli.mjs" doctor` and follow its `Next step:`
+  line before retrying anything.
+
 Rules:
 - Never edit files yourself; only the two `node` commands above may act on the repository.
 - Never call `approve-topology` unless the user's raw arguments literally include `--approve`.

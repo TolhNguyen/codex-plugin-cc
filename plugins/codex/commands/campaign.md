@@ -49,6 +49,15 @@ something this command can do to an existing campaign — it requires either a n
 budget fields in `.ai-company/campaigns/<id>/campaign.json` that the user asks for by name.
 Never silently continue running a paused campaign, and never edit that file yourself.
 
+Troubleshooting:
+- If a `node` command above fails with `MODULE_NOT_FOUND` on a path containing an old plugin
+  version (e.g. `...\codex\1.0.6\...`), the plugin was updated while this Claude Code session was
+  running. Do not retry with a guessed or corrected path — tell the user to restart the session so
+  commands resolve to the new version.
+- For any other unexpected failure, run
+  `node "${CLAUDE_PLUGIN_ROOT}/scripts/orchestration-cli.mjs" doctor` and follow its `Next step:`
+  line before retrying anything.
+
 Rules:
 - Never edit files yourself; only the `node ... orchestration-cli.mjs campaign ...` command
   above may act on the repository.
