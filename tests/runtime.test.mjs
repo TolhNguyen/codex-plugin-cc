@@ -2257,3 +2257,72 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
   assert.equal(payload.sessionRuntime.mode, "shared");
   assert.equal(payload.sessionRuntime.endpoint, "unix:/tmp/fake-broker.sock");
 });
+
+// Regression: a broker.json left behind by a previous Claude session (its
+// broker process is gone) must not make auth checks report "not logged in".
+// getCodexAuthStatus used to connect with reuseExistingBroker straight into
+// the dead pipe, catch ENOENT, and report loggedIn: false — /codex:setup
+// then told an authenticated user to run `codex login`.
+test("setup verifies auth directly when the recorded shared broker pipe is dead", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const pluginData = makeTempDir();
+  installFakeCodex(binDir);
+
+  // Record a broker session whose endpoint nobody is listening on, exactly
+  // like a previous session's broker that has since exited.
+  const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = pluginData;
+  try {
+    saveBrokerSession(repo, {
+      endpoint:
+        process.platform === "win32"
+          ? "pipe:\\.\pipe\cxc-dead-test-pipe-runtime"
+          : `unix:${path.join(pluginData, "dead-broker.sock")}`,
+      pidFile: path.join(pluginData, "broker.pid"),
+      logFile: path.join(pluginData, "broker.log"),
+      sessionDir: pluginData,
+      pid: null
+    });
+    assert.ok(loadBrokerSession(repo));
+  } finally {
+    if (previousPluginData === undefined) {
+      delete process.env.CLAUDE_PLUGIN_DATA;
+    } else {
+      process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+    }
+  }
+
+  const result = run("node", [SCRIPT, "setup", "--json"], {
+    cwd: repo,
+    env: { ...buildEnv(binDir), CLAUDE_PLUGIN_DATA: pluginData }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.auth.loggedIn, true, JSON.stringify(payload.auth));
+  assert.equal(payload.ready, true);
+});
+
+// Same failure mode when the dead endpoint arrives via the session env var
+// instead of the recorded broker.json.
+test("setup verifies auth directly when the env-provided broker endpoint is dead", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+
+  const result = run("node", [SCRIPT, "setup", "--json"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_COMPANION_APP_SERVER_ENDPOINT:
+        process.platform === "win32"
+          ? "pipe:\\.\pipe\cxc-dead-test-pipe-env"
+          : `unix:${path.join(repo, "dead-broker.sock")}`
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.auth.loggedIn, true, JSON.stringify(payload.auth));
+});

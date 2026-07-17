@@ -946,11 +946,23 @@ export async function getCodexAuthStatus(cwd, options = {}) {
     });
     return await getCodexAuthStatusFromClient(client, cwd);
   } catch (error) {
-    return buildAuthStatus({
-      loggedIn: false,
-      detail: error instanceof Error ? error.message : String(error),
-      source: "app-server"
-    });
+    // A dead shared runtime (stale pipe, crashed broker) says nothing about
+    // authentication — verify against a directly spawned app-server before
+    // reporting anything.
+    try {
+      client = await CodexAppServerClient.connect(cwd, {
+        env: options.env,
+        disableBroker: true
+      });
+      return await getCodexAuthStatusFromClient(client, cwd);
+    } catch (directError) {
+      const message = directError instanceof Error ? directError.message : String(directError);
+      return buildAuthStatus({
+        loggedIn: false,
+        detail: `Could not reach the Codex runtime to verify authentication (${message}). This is a runtime problem, not proof you are logged out — check with \`codex login status\`.`,
+        source: "unreachable"
+      });
+    }
   } finally {
     if (client) {
       await client.close().catch(() => {});
