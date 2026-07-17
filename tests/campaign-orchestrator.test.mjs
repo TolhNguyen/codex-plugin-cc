@@ -134,10 +134,10 @@ test("createCampaign: validates, persists, audits, and merges budget defaults ov
     });
     assert.deepEqual(campaign.budget, {
       maxExecutiveCalls: 5,
-      maxManagerCalls: 30,
+      maxManagerCalls: 60,
       maxWorkerCalls: 10,
       maxAttemptsPerTask: 3,
-      maxCampaignDurationMinutes: 180
+      maxCampaignDurationMinutes: 360
     });
     assert.ok(typeof campaign.startedAt === "string" && campaign.startedAt.length > 0);
 
@@ -158,10 +158,10 @@ test("createCampaign: uses full defaults when no budget overrides are given", ()
     const campaign = createCampaign(rootDir, { brief: "b", acceptanceCriteria: ["x"] });
     assert.deepEqual(campaign.budget, {
       maxExecutiveCalls: 5,
-      maxManagerCalls: 30,
-      maxWorkerCalls: 60,
+      maxManagerCalls: 60,
+      maxWorkerCalls: 150,
       maxAttemptsPerTask: 3,
-      maxCampaignDurationMinutes: 180
+      maxCampaignDurationMinutes: 360
     });
   });
 });
@@ -412,6 +412,35 @@ test("buildWorkerContext: renders a Reviewer feedback section only when feedback
     assert.match(secondAttempt.userPrompt, /## Reviewer feedback/);
     assert.match(secondAttempt.userPrompt, /MISSING_TESTS/);
     assert.match(secondAttempt.userPrompt, /add a test for Y/);
+  });
+});
+
+test("buildWorkerContext: the system prompt states the full submit_result contract from the schema", () => {
+  withTempDir((rootDir) => {
+    saveSkill(rootDir, makeSkillDoc());
+    const agent = makeAgentDoc();
+    const task = makeTaskDoc();
+
+    const { systemPrompt } = buildWorkerContext(rootDir, task, agent);
+
+    assert.match(systemPrompt, /## submit_result contract/);
+    // Every required task-result field must be named, with enums spelled out.
+    for (const field of [
+      "taskId",
+      "agentId",
+      "summary",
+      "status",
+      "changedFiles",
+      "commandsExecuted",
+      "verification",
+      "risks",
+      "memoryProposals",
+      "skillProposals"
+    ]) {
+      assert.ok(systemPrompt.includes(`- ${field}:`), `contract must name ${field}`);
+    }
+    assert.match(systemPrompt, /"completed" \| "needs_review" \| "failed" \| "escalate"/);
+    assert.match(systemPrompt, /object with required \{ passed, details \}/);
   });
 });
 
@@ -877,6 +906,249 @@ test("runCampaignTask: campaign.budget.maxAttemptsPerTask clamps task.maxAttempt
     assert.equal(workerCalls, 1);
     assert.equal(result.loop.attempts, 1);
     assert.equal(result.loop.outcome, "escalated");
+  });
+});
+
+test("runCampaignTask: an over-sized task is rejected by lint BEFORE any budget is spent", async () => {
+  await withTempDirAsync(async (rootDir) => {
+    saveSkill(rootDir, makeSkillDoc());
+    saveAgent(rootDir, makeAgentDoc({ ownership: { primary: ["src/**"], secondary: [], excluded: [] }, permissions: { read: ["**"], write: ["src/**"] } }));
+
+    const campaign = createCampaign(rootDir, { brief: "b", acceptanceCriteria: ["x"] });
+    campaign.status = "running";
+    saveCampaign(rootDir, campaign);
+
+    const task = makeTaskDoc({
+      campaignId: campaign.campaignId,
+      affectedPaths: ["src/a.js", "src/b.js", "src/c.js", "src/d.js", "src/e.js", "src/f.js", "src/g.js"]
+    });
+
+    let workerCalled = false;
+    let managerCalled = false;
+    const workerRuntimeFactory = () => ({ execute: async () => { workerCalled = true; throw new Error("must not run"); } });
+    const managerRuntimeFactory = () => ({ execute: async () => { managerCalled = true; throw new Error("must not run"); } });
+    const managerAgent = { id: "manager-codex", name: "Manager", runtime: { provider: "codex", model: null } };
+
+    const result = await runCampaignTask(rootDir, {
+      campaign,
+      task,
+      managerAgent,
+      workerRuntimeFactory,
+      managerRuntimeFactory
+    });
+
+    assert.equal(result.loop.outcome, "rejected_by_lint");
+    assert.equal(result.loop.attempts, 0);
+    assert.ok(result.lint.errors.some((f) => f.code === "TOO_MANY_PATHS"));
+    assert.equal(workerCalled, false);
+    assert.equal(managerCalled, false);
+
+    const persistedCampaign = loadCampaign(rootDir, campaign.campaignId);
+    assert.equal(persistedCampaign.usage.workerCalls, 0);
+    assert.equal(persistedCampaign.usage.managerCalls, 0);
+
+    const events = readAuditEvents(rootDir, campaign.campaignId);
+    assert.ok(events.some((event) => event.event === "task_lint_rejected"));
+  });
+});
+
+test("runCampaignTask: lint: { enforce: false } lets an over-sized task run anyway (unleashed mode)", async () => {
+  await withTempDirAsync(async (rootDir) => {
+    saveSkill(rootDir, makeSkillDoc());
+    saveAgent(
+      rootDir,
+      makeAgentDoc({ ownership: { primary: ["src/**"], secondary: [], excluded: [] }, permissions: { read: ["**"], write: ["src/**"] } })
+    );
+
+    const campaign = createCampaign(rootDir, { brief: "b", acceptanceCriteria: ["x"] });
+    campaign.status = "running";
+    saveCampaign(rootDir, campaign);
+
+    const task = makeTaskDoc({
+      campaignId: campaign.campaignId,
+      affectedPaths: ["src/a.js", "src/b.js", "src/c.js", "src/d.js", "src/e.js", "src/f.js", "src/g.js"]
+    });
+
+    const workerResult = createRuntimeResult({
+      executionId: "exec-w1",
+      agentId: "worker-a",
+      role: "worker",
+      status: "completed",
+      output: JSON.stringify(makeTaskResultDoc()),
+      startedAt: "2026-07-14T00:00:00.000Z",
+      endedAt: "2026-07-14T00:00:01.000Z"
+    });
+    const workerRuntimeFactory = () => ({ execute: async () => workerResult });
+    const approveDecision = { taskId: task.taskId, decision: "approve", feedback: [], nextAttempt: 2, maxAttempts: 3 };
+    const managerRuntimeFactory = () => ({
+      execute: async () =>
+        createRuntimeResult({
+          executionId: "exec-m1",
+          agentId: "manager-codex",
+          role: "manager",
+          status: "completed",
+          output: JSON.stringify(approveDecision),
+          startedAt: "2026-07-14T00:00:01.000Z",
+          endedAt: "2026-07-14T00:00:01.500Z"
+        })
+    });
+    const managerAgent = { id: "manager-codex", name: "Manager", runtime: { provider: "codex", model: null } };
+
+    const result = await runCampaignTask(rootDir, {
+      campaign,
+      task,
+      managerAgent,
+      workerRuntimeFactory,
+      managerRuntimeFactory,
+      lint: { enforce: false }
+    });
+
+    assert.equal(result.loop.outcome, "approved");
+    assert.equal(result.lint.ok, false);
+  });
+});
+
+test("runCampaignTask: an escalated task gets a manager triage decision, persisted and audited", async () => {
+  await withTempDirAsync(async (rootDir) => {
+    saveSkill(rootDir, makeSkillDoc());
+    saveAgent(rootDir, makeAgentDoc());
+
+    const campaign = createCampaign(rootDir, {
+      brief: "b",
+      acceptanceCriteria: ["x"],
+      budget: { maxWorkerCalls: 10, maxManagerCalls: 10, maxAttemptsPerTask: 1 }
+    });
+    campaign.status = "running";
+    saveCampaign(rootDir, campaign);
+
+    const task = makeTaskDoc({ campaignId: campaign.campaignId, maxAttempts: 3 });
+
+    const workerResult = createRuntimeResult({
+      executionId: "exec-w1",
+      agentId: "worker-a",
+      role: "worker",
+      status: "completed",
+      output: JSON.stringify(makeTaskResultDoc({ status: "failed" })),
+      startedAt: "2026-07-14T00:00:00.000Z",
+      endedAt: "2026-07-14T00:00:01.000Z"
+    });
+    const workerRuntimeFactory = () => ({ execute: async () => workerResult });
+
+    const reworkDecision = { taskId: task.taskId, decision: "rework", feedback: [{ code: "X", description: "incomplete" }], nextAttempt: 2, maxAttempts: 3 };
+    const triageDecision = {
+      taskId: task.taskId,
+      action: "shrink",
+      rationale: "Task too large for the worker's budget.",
+      fixes: [],
+      suggestedTasks: [
+        {
+          title: "First slice",
+          goal: "Do the first compilable slice.",
+          affectedPaths: ["src/alpha/file.js"],
+          verificationCommands: ["npm test"],
+          contextFiles: ["src/alpha/reference.js"]
+        }
+      ]
+    };
+    const managerRuntimeFactory = () => ({
+      execute: async (_agent, _task, { outputSchema }) => {
+        const isTriage = outputSchema?.title === "EscalationTriage";
+        return createRuntimeResult({
+          executionId: isTriage ? "exec-triage" : "exec-review",
+          agentId: "manager-codex",
+          role: "manager",
+          status: "completed",
+          output: JSON.stringify(isTriage ? triageDecision : reworkDecision),
+          startedAt: "2026-07-14T00:00:01.000Z",
+          endedAt: "2026-07-14T00:00:01.500Z"
+        });
+      }
+    });
+    const managerAgent = { id: "manager-codex", name: "Manager", runtime: { provider: "codex", model: null } };
+
+    const result = await runCampaignTask(rootDir, {
+      campaign,
+      task,
+      managerAgent,
+      workerRuntimeFactory,
+      managerRuntimeFactory
+    });
+
+    assert.equal(result.loop.outcome, "escalated");
+    assert.equal(result.escalation.decision.action, "shrink");
+    assert.equal(result.escalation.triageError, null);
+    assert.equal(result.escalation.report.attempts, 1);
+
+    const filePath = path.join(rootDir, ".ai-company", "campaigns", campaign.campaignId, "escalations", `${task.taskId}.json`);
+    assert.ok(fs.existsSync(filePath));
+
+    const events = readAuditEvents(rootDir, campaign.campaignId);
+    const triaged = events.find((event) => event.event === "escalation_triaged");
+    assert.equal(triaged.action, "shrink");
+
+    // Per-task spend attribution: 1 worker call, 2 manager calls (review + triage).
+    const persistedCampaign = loadCampaign(rootDir, campaign.campaignId);
+    const stats = persistedCampaign.usage.taskStats[task.taskId];
+    assert.equal(stats.outcome, "escalated");
+    assert.equal(stats.workerCalls, 1);
+    assert.equal(stats.managerCalls, 2);
+  });
+});
+
+test("runCampaignTask: usage.taskStats records per-task spend on the happy path too", async () => {
+  await withTempDirAsync(async (rootDir) => {
+    saveSkill(rootDir, makeSkillDoc());
+    saveAgent(rootDir, makeAgentDoc({ runtime: { provider: "deepseek", model: "deepseek-chat" } }));
+
+    const campaign = createCampaign(rootDir, { brief: "b", acceptanceCriteria: ["x"] });
+    campaign.status = "running";
+    saveCampaign(rootDir, campaign);
+
+    const task = makeTaskDoc({ campaignId: campaign.campaignId });
+
+    const workerResult = createRuntimeResult({
+      executionId: "exec-w1",
+      agentId: "worker-a",
+      role: "worker",
+      status: "completed",
+      output: JSON.stringify(makeTaskResultDoc()),
+      usage: { inputTokens: 1000, outputTokens: 1000, calls: 1 },
+      startedAt: "2026-07-14T00:00:00.000Z",
+      endedAt: "2026-07-14T00:00:01.000Z"
+    });
+    const workerRuntimeFactory = () => ({ execute: async () => workerResult });
+    const approveDecision = { taskId: task.taskId, decision: "approve", feedback: [], nextAttempt: 2, maxAttempts: 3 };
+    const managerRuntimeFactory = () => ({
+      execute: async () =>
+        createRuntimeResult({
+          executionId: "exec-m1",
+          agentId: "manager-codex",
+          role: "manager",
+          status: "completed",
+          output: JSON.stringify(approveDecision),
+          startedAt: "2026-07-14T00:00:01.000Z",
+          endedAt: "2026-07-14T00:00:01.500Z"
+        })
+    });
+    const managerAgent = { id: "manager-codex", name: "Manager", runtime: { provider: "codex", model: null } };
+
+    const result = await runCampaignTask(rootDir, {
+      campaign,
+      task,
+      managerAgent,
+      workerRuntimeFactory,
+      managerRuntimeFactory
+    });
+    assert.equal(result.loop.outcome, "approved");
+
+    const persistedCampaign = loadCampaign(rootDir, campaign.campaignId);
+    const stats = persistedCampaign.usage.taskStats[task.taskId];
+    assert.equal(stats.outcome, "approved");
+    assert.equal(stats.attempts, 1);
+    assert.equal(stats.workerCalls, 1);
+    assert.equal(stats.managerCalls, 1);
+    assert.equal(stats.reworks, 0);
+    assert.ok(stats.estimatedCostByProvider.deepseek > 0, "per-task deepseek cost must be attributed");
   });
 });
 

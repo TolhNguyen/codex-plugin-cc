@@ -29,8 +29,8 @@ import { createPermissionGuard } from "../agents/permission-guard.mjs";
 import { loadOrchestrationSchema, validateAgainstSchema } from "../lib/schema-validator.mjs";
 import { resolveProvider } from "./provider-presets.mjs";
 
-const DEFAULT_MAX_TOOL_CALLS = 40;
-const DEFAULT_MAX_EXECUTION_MINUTES = 20;
+const DEFAULT_MAX_TOOL_CALLS = 150;
+const DEFAULT_MAX_EXECUTION_MINUTES = 45;
 const MAX_FILE_READ_BYTES = 64 * 1024;
 const MAX_DIR_ENTRIES = 200;
 const MAX_TOOL_CALL_RESULT_CHARS = 400;

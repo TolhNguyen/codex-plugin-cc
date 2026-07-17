@@ -322,7 +322,8 @@ export OPENAI_COMPAT_API_KEY=...
   `draft → active` so routing and workers may use it.
 - `/codex:campaign <create|list|show|run-task|approve|review-proposals|accept>` — run a campaign
   end-to-end. Approvals, memory decisions, and final acceptance each require an explicit role
-  argument; nothing auto-approves.
+  argument; nothing auto-approves. `run-task` accepts `--no-lint` to bypass the task-size lint
+  for deliberate experiment runs.
 
 ### Quickstart
 
@@ -345,6 +346,21 @@ export DEEPSEEK_API_KEY=sk-...
 - **Bounded everything** — the review loop caps attempts; the worker tool loop caps tool calls
   and wall-clock time; a per-campaign budget throttles Executive/Manager/Worker calls and pauses
   the campaign (never crashes, never silently continues) when a limit is hit.
+- **Task-size lint** — `run-task` rejects over-sized or unverifiable tasks *before* any budget
+  is spent (too many paths, no verification command, tool budget below the estimated minimum;
+  warnings for docker-style verification and missing context files). Bypass with `--no-lint`.
+- **Manager-tier escalation triage** — when a task escalates, the Codex manager turns the
+  failure into a compact report plus a recommended action (`retry_with_fixes` / `shrink` /
+  `split` / `reassign` / `handle_directly`), persisted under
+  `.ai-company/campaigns/<id>/escalations/`. The Executive approves a direction instead of
+  re-reading raw logs — the expensive tier never absorbs the diagnosis work.
+- **Per-task spend attribution** — every `run-task` records
+  `campaign.usage.taskStats[taskId]` (outcome, attempts, worker/manager calls, estimated cost
+  per provider), so "is delegating to the cheap worker actually saving money?" is answered by
+  data, not vibes.
+- **Schema-derived result contract** — the worker's system prompt embeds the exact
+  `submit_result` shape generated from the task-result schema, eliminating the
+  "guessed-the-shape-wrong-twice" failure mode observed with cheap models.
 - **Least privilege** — workers read/write only paths their agent permits; the `.ai-company/`
   governance store is always read- and write-denied to workers; context files are permission-guarded.
 - **Governed memory** — workers can only *propose* memory; a Manager decision (with an explicit
@@ -365,13 +381,16 @@ All campaign state lives under `.ai-company/` in your repo. A ready-to-copy exam
 | [`docs/MEMORY_GOVERNANCE.md`](./docs/MEMORY_GOVERNANCE.md) | Proposal → decision → versioned memory |
 | [`docs/WORKER_RUNTIME.md`](./docs/WORKER_RUNTIME.md) | Runtime contract, the worker tool loop, providers |
 | [`docs/BOOTSTRAP_FLOW.md`](./docs/BOOTSTRAP_FLOW.md) | End-to-end bootstrap → campaign walkthrough |
+| [`docs/CAMPAIGN_RUNBOOK.md`](./docs/CAMPAIGN_RUNBOOK.md) | How to run campaigns WITHOUT inverting the economics: task authoring rules, escalation flow, reading per-task spend |
 | [`docs/CURRENT_ARCHITECTURE.md`](./docs/CURRENT_ARCHITECTURE.md) | The original plugin this builds on |
 
 ### Status & known gaps
 
 The runtime is implemented and covered by tests (Node's built-in test runner, no new runtime
-dependencies). It has been validated end-to-end against local fixtures; a real campaign run
-requires a worker API key. Known gaps, tracked for follow-up:
+dependencies), validated end-to-end against local fixtures **and** with a real campaign run on
+this repository: a `deepseek-chat` worker (high limits, no pre-stuffed context) wrote a 45-test
+suite for `lib/args.mjs`, self-verified, and was approved by the Codex manager on attempt 1 for
+≈ $0.024 — see `docs/CAMPAIGN_RUNBOOK.md` §9. Known gaps, tracked for follow-up:
 
 - `agent.ownership.excluded` is present in the schema but not yet enforced by routing.
 - Core skills are not yet auto-copied into `.ai-company/` at bootstrap.

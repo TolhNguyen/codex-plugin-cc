@@ -102,6 +102,10 @@
         "estimatedCostByProvider": {
           "type": "object",
           "additionalProperties": true
+        },
+        "taskStats": {
+          "type": "object",
+          "additionalProperties": true
         }
       }
     },

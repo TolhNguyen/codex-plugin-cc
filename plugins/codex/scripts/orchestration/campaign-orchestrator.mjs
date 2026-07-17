@@ -6,8 +6,10 @@ import { loadOrchestrationSchema, validateAgainstSchema } from "../lib/schema-va
 import { readJsonFile, writeJsonFile } from "../lib/fs.mjs";
 import { appendAuditEvent } from "./audit-log.mjs";
 import { routeTask } from "./task-router.mjs";
+import { lintTask } from "./task-lint.mjs";
 import { createCodexReviewer, runReviewLoop } from "./review-loop.mjs";
-import { createBudget } from "./budget.mjs";
+import { createCodexEscalationTriage, runEscalationTriage } from "./escalation-triage.mjs";
+import { createBudget, diffUsage } from "./budget.mjs";
 import { recordProposals } from "../memory/proposal-store.mjs";
 import { listMemoryEntries, renderMemoryForPrompt } from "../memory/memory-store.mjs";
 import { assertSkillsActive } from "../skills/skill-registry.mjs";
@@ -31,10 +33,10 @@ import { createPermissionGuard } from "../agents/permission-guard.mjs";
 
 const DEFAULT_BUDGET = {
   maxExecutiveCalls: 5,
-  maxManagerCalls: 30,
-  maxWorkerCalls: 60,
+  maxManagerCalls: 60,
+  maxWorkerCalls: 150,
   maxAttemptsPerTask: 3,
-  maxCampaignDurationMinutes: 180
+  maxCampaignDurationMinutes: 360
 };
 
 const MAX_CONTEXT_FILE_BYTES = 32 * 1024;
@@ -255,6 +257,35 @@ function readContextFileBlock(guard, relPath) {
   return `### ${relPath}\n${buffer.toString("utf8")}`;
 }
 
+// Renders the task-result contract for the worker's system prompt, generated
+// FROM the schema so it can never drift from what `submit_result` actually
+// validates. Motivation: the observed real-world worker failure mode is a
+// cheap model guessing the result shape wrong twice and dying with
+// "submit_result failed schema validation twice" — an entirely avoidable
+// escalation when the required shape is simply stated up front.
+function renderTaskResultContract() {
+  const schema = loadOrchestrationSchema("task-result");
+  const lines = ["Call `submit_result` exactly once with `result` containing ALL of these required fields:"];
+
+  for (const key of schema.required ?? []) {
+    const prop = schema.properties?.[key] ?? {};
+    let shape;
+    if (Array.isArray(prop.enum)) {
+      shape = prop.enum.map((value) => JSON.stringify(value)).join(" | ");
+    } else if (prop.type === "array") {
+      shape = `array of ${prop.items?.type ?? "any"}`;
+    } else if (prop.type === "object" && Array.isArray(prop.required)) {
+      shape = `object with required { ${prop.required.join(", ")} }`;
+    } else {
+      shape = prop.type ?? "any";
+    }
+    lines.push(`- ${key}: ${shape}`);
+  }
+
+  lines.push("Use empty arrays ([]) for list fields with nothing to report. Do not add any other fields.");
+  return lines.join("\n");
+}
+
 function buildIdentityBlock(agent) {
   const lines = [
     `You are agent \`${agent.id}\` (${agent.name}).`,
@@ -327,7 +358,10 @@ export function buildWorkerContext(rootDir, task, agent, feedback = []) {
     memoryBlock,
     "",
     "## Hard rules",
-    ...HARD_RULES
+    ...HARD_RULES,
+    "",
+    "## submit_result contract",
+    renderTaskResultContract()
   ].join("\n");
 
   const userPrompt = buildUserPrompt(task, contextBlocks, feedback);
@@ -361,9 +395,13 @@ function tryParseTaskResult(output) {
  *   managerAgent: object,
  *   workerRuntimeFactory?: Function,
  *   managerRuntimeFactory?: Function,
- *   env?: object
- * }} options
- * @returns {Promise<{ routing: object, loop: object, proposals: { stored: object[], rejected: object[] } }>}
+ *   env?: object,
+ *   lint?: { enforce?: boolean, limits?: object }
+ * }} options `lint.enforce` defaults to true: a task failing the size lint is
+ *   rejected BEFORE any budget is spent. Pass `lint: { enforce: false }`
+ *   (CLI: `--no-lint`) for deliberate unleashed runs — warnings are still
+ *   audited either way.
+ * @returns {Promise<{ routing: object, lint: object, loop: object, proposals: { stored: object[], rejected: object[] }, escalation: object|null }>}
  */
 export async function runCampaignTask(
   rootDir,
@@ -373,7 +411,8 @@ export async function runCampaignTask(
     managerAgent,
     workerRuntimeFactory = createOpenAICompatibleRuntime,
     managerRuntimeFactory = createCodexRuntime,
-    env = process.env
+    env = process.env,
+    lint: lintOptions = {}
   }
 ) {
   // Code-level approval gate: a campaign that was never approved (or was
@@ -398,7 +437,35 @@ export async function runCampaignTask(
     });
   }
 
+  // Size lint BEFORE any budget is spent: an over-sized task is the single
+  // most expensive failure mode of this runtime (worker burns every attempt,
+  // then escalates to the priciest tier), so it gets rejected at the door
+  // unless the caller explicitly runs unleashed (`lint.enforce === false`).
+  const lint = lintTask(task, { agent: routing.owner, limits: lintOptions.limits });
+  if (lint.warnings.length > 0) {
+    appendAuditEvent(rootDir, campaign.campaignId, {
+      event: "task_lint_warnings",
+      taskId: task.taskId,
+      warnings: lint.warnings
+    });
+  }
+  if (!lint.ok && lintOptions.enforce !== false) {
+    appendAuditEvent(rootDir, campaign.campaignId, {
+      event: "task_lint_rejected",
+      taskId: task.taskId,
+      errors: lint.errors
+    });
+    return {
+      routing,
+      lint,
+      loop: { outcome: "rejected_by_lint", attempts: 0 },
+      proposals: { stored: [], rejected: [] },
+      escalation: null
+    };
+  }
+
   const budget = createBudget(campaign);
+  const usageBefore = budget.snapshot();
 
   // Wrap both runtimes so EVERY runtime result they ever produce (every
   // worker attempt, every manager review call including the schema-repair
@@ -457,6 +524,35 @@ export async function runCampaignTask(
     budget.recordRework();
   }
 
+  // Escalation triage: the MANAGER (Codex) absorbs the failure diagnosis so
+  // the Executive receives a compact report + a recommended action, never raw
+  // logs. Budget-guarded like any manager call; never throws (a failed triage
+  // still persists the report with decision: null).
+  let escalation = null;
+  if (loop.outcome === "escalated") {
+    const triageFn = createCodexEscalationTriage({ rootDir, runtime: managerRuntime, managerAgent });
+    escalation = await runEscalationTriage(rootDir, {
+      campaignId: campaign.campaignId,
+      task: taskForLoop,
+      loop,
+      triageFn,
+      guards: { beforeManagerCall: guards.beforeManagerCall }
+    });
+  }
+
+  // Per-task spend attribution: what THIS task cost, per tier — the number
+  // that says whether delegating it to a cheap worker saved money or burned
+  // it twice. Includes reworks and the triage manager call above.
+  const usageAfter = budget.snapshot();
+  campaign.usage.taskStats = {
+    ...(campaign.usage.taskStats ?? {}),
+    [task.taskId]: {
+      outcome: loop.outcome,
+      attempts: loop.attempts,
+      ...diffUsage(usageBefore, usageAfter)
+    }
+  };
+
   // Cost is already accounted for every runtime call via wrapRuntimeForCost
   // above (worker attempts + manager review calls, including reworks and the
   // schema-repair retry) — no further estimateCost call is needed here.
@@ -490,5 +586,5 @@ export async function runCampaignTask(
     });
   }
 
-  return { routing, loop, proposals };
+  return { routing, lint, loop, proposals, escalation };
 }

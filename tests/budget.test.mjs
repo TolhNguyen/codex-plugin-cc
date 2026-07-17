@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createBudget, PROVIDER_PRICING } from "../plugins/codex/scripts/orchestration/budget.mjs";
+import { createBudget, diffUsage, PROVIDER_PRICING } from "../plugins/codex/scripts/orchestration/budget.mjs";
 
 function makeCampaign(overrides = {}) {
   return {
@@ -167,4 +167,40 @@ test("snapshot returns a plain copy of usage, not a live reference", () => {
   assert.equal(snap.reworks, 0);
   assert.equal(campaign.usage.reworks, 1);
   assert.notEqual(snap, campaign.usage);
+});
+
+// --- diffUsage -------------------------------------------------------------
+
+test("diffUsage: attributes per-task call/cost deltas between two snapshots", async () => {
+  const campaign = makeCampaign({ budget: { maxWorkerCalls: 5, maxManagerCalls: 5 } });
+  const budget = createBudget(campaign);
+
+  const before = budget.snapshot();
+  await budget.guards.beforeWorkerCall();
+  await budget.guards.beforeWorkerCall();
+  await budget.guards.beforeManagerCall();
+  budget.recordRework();
+  budget.estimateCost("deepseek", { inputTokens: 1000, outputTokens: 1000 });
+  const after = budget.snapshot();
+
+  const delta = diffUsage(before, after);
+  assert.equal(delta.workerCalls, 2);
+  assert.equal(delta.managerCalls, 1);
+  assert.equal(delta.executiveCalls, 0);
+  assert.equal(delta.reworks, 1);
+  const expectedCost = (1000 / 1000) * PROVIDER_PRICING.deepseek.input + (1000 / 1000) * PROVIDER_PRICING.deepseek.output;
+  assert.ok(Math.abs(delta.estimatedCostByProvider.deepseek - expectedCost) < 1e-9);
+});
+
+test("diffUsage: zero-delta providers are omitted; missing snapshots tolerated", () => {
+  const delta = diffUsage(
+    { workerCalls: 1, managerCalls: 1, executiveCalls: 0, reworks: 0, estimatedCostByProvider: { codex: 0 } },
+    { workerCalls: 1, managerCalls: 2, executiveCalls: 0, reworks: 0, estimatedCostByProvider: { codex: 0 } }
+  );
+  assert.equal(delta.managerCalls, 1);
+  assert.deepEqual(delta.estimatedCostByProvider, {});
+
+  const fromNothing = diffUsage(undefined, { workerCalls: 3, estimatedCostByProvider: { deepseek: 0.5 } });
+  assert.equal(fromNothing.workerCalls, 3);
+  assert.equal(fromNothing.estimatedCostByProvider.deepseek, 0.5);
 });

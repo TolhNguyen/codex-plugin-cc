@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EscalationTriage",
+  "description": "Manager output contract triaging an escalated task before it reaches the Executive.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "taskId",
+    "action",
+    "rationale",
+    "fixes",
+    "suggestedTasks"
+  ],
+  "properties": {
+    "taskId": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "retry_with_fixes",
+        "shrink",
+        "split",
+        "reassign",
+        "handle_directly"
+      ]
+    },
+    "rationale": {
+      "type": "string"
+    },
+    "fixes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "description"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "suggestedTasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "goal",
+          "affectedPaths",
+          "verificationCommands",
+          "contextFiles"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "goal": {
+            "type": "string"
+          },
+          "affectedPaths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "verificationCommands": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "contextFiles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -310,7 +310,7 @@ async function handleCampaignShow(argv) {
 async function handleCampaignRunTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd", "task-file", "manager-agent"],
-    booleanOptions: ["json"]
+    booleanOptions: ["json", "no-lint"]
   });
   const campaignId = positionals[0];
   if (!campaignId) {
@@ -338,7 +338,12 @@ async function handleCampaignRunTask(argv) {
     runtime: { provider: "codex", model: null }
   };
 
-  const result = await runCampaignTask(cwd, { campaign, task, managerAgent });
+  const result = await runCampaignTask(cwd, {
+    campaign,
+    task,
+    managerAgent,
+    lint: { enforce: !options["no-lint"] }
+  });
 
   if (options.json) {
     outputResult(result, true);
@@ -351,12 +356,36 @@ async function handleCampaignRunTask(argv) {
     `Owner: ${result.routing.owner.id}`,
     `Memory proposals stored: ${result.proposals.stored.length}, rejected: ${result.proposals.rejected.length}`
   ];
+  if (result.loop.outcome === "rejected_by_lint") {
+    lines.push("Task rejected by size lint BEFORE spending any budget:");
+    for (const item of result.lint.errors) {
+      lines.push(`- [${item.code}] ${item.message}`);
+      lines.push(`  Fix: ${item.recommendation}`);
+    }
+    lines.push("Re-run with --no-lint to force an unleashed run.");
+  } else if (result.lint?.warnings?.length > 0) {
+    for (const item of result.lint.warnings) {
+      lines.push(`Lint warning [${item.code}]: ${item.message}`);
+    }
+  }
   if (result.loop.outcome === "halted") {
     lines.push(`Halt reason: ${result.loop.reason ?? "(unknown)"}`);
     lines.push("The campaign has been paused on budget exhaustion.");
   }
   if (result.loop.outcome === "escalated" || result.loop.outcome === "escalate") {
     lines.push(`Escalation feedback: ${JSON.stringify(result.loop.decision?.feedback ?? [])}`);
+    if (result.escalation?.decision) {
+      lines.push(`Manager triage: ${result.escalation.decision.action} — ${result.escalation.decision.rationale}`);
+    } else if (result.escalation) {
+      lines.push(`Manager triage unavailable (${result.escalation.triageError ?? "unknown"}); compact report persisted under .ai-company/campaigns/${campaignId}/escalations/`);
+    }
+  }
+  const taskStats = campaign.usage?.taskStats?.[task.taskId];
+  if (taskStats) {
+    lines.push(
+      `Task spend: worker calls ${taskStats.workerCalls}, manager calls ${taskStats.managerCalls}, ` +
+        `reworks ${taskStats.reworks}, est. cost ${JSON.stringify(taskStats.estimatedCostByProvider)}`
+    );
   }
   outputResult(`${lines.join("\n")}\n`, false);
 }

@@ -83,3 +83,37 @@ export function createBudget(campaign) {
 
   return { guards, checkDeadline, recordRework, estimateCost, snapshot };
 }
+
+/**
+ * Delta between two usage snapshots (see `snapshot()` above), used to
+ * attribute per-task spend: `runCampaignTask` snapshots usage before and
+ * after a task's loop and stores the diff in `usage.taskStats[taskId]` so a
+ * campaign can answer "what did each APPROVED task actually cost, per tier"
+ * — the number that tells you whether delegating to a cheap worker is
+ * saving money or burning it twice.
+ *
+ * @param {object} before a usage snapshot
+ * @param {object} after a later usage snapshot
+ * @returns {{ workerCalls: number, managerCalls: number, executiveCalls: number, reworks: number, estimatedCostByProvider: object }}
+ */
+export function diffUsage(before, after) {
+  const estimatedCostByProvider = {};
+  const providers = new Set([
+    ...Object.keys(before?.estimatedCostByProvider ?? {}),
+    ...Object.keys(after?.estimatedCostByProvider ?? {})
+  ]);
+  for (const provider of providers) {
+    const delta = (after?.estimatedCostByProvider?.[provider] ?? 0) - (before?.estimatedCostByProvider?.[provider] ?? 0);
+    if (delta !== 0) {
+      estimatedCostByProvider[provider] = delta;
+    }
+  }
+
+  return {
+    workerCalls: (after?.workerCalls ?? 0) - (before?.workerCalls ?? 0),
+    managerCalls: (after?.managerCalls ?? 0) - (before?.managerCalls ?? 0),
+    executiveCalls: (after?.executiveCalls ?? 0) - (before?.executiveCalls ?? 0),
+    reworks: (after?.reworks ?? 0) - (before?.reworks ?? 0),
+    estimatedCostByProvider
+  };
+}

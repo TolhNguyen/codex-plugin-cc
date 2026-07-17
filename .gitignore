@@ -148,3 +148,7 @@ vite.config.ts.timestamp-*
 
 output/
 plugins/codex/.generated/
+
+# Local orchestration state (campaigns, executions, agent registry) — the
+# committed example lives in .ai-company.example/
+.ai-company/
