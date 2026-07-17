@@ -81,10 +81,27 @@ test("continue is not exposed as a user-facing command", () => {
     "result.md",
     "review.md",
     "setup.md",
-    "skill.md",
+    "skills.md",
     "status.md",
     "transfer.md"
   ]);
+});
+
+// Regression: a command file named skill.md matches Claude Code's `SKILL.md`
+// skill-definition convention on case-insensitive filesystems (Windows/macOS).
+// The harness then treats the whole commands/ directory as ONE skill named
+// "commands" (the directory name) and silently drops every slash command in
+// it — observed as `/codex:setup` etc. reporting "Unknown command" while a
+// bogus `/codex:commands` served skill.md's content.
+test("no command file may be named skill.md (collides with the SKILL.md convention)", () => {
+  const commandFiles = fs.readdirSync(path.join(PLUGIN_ROOT, "commands"));
+  for (const file of commandFiles) {
+    assert.notEqual(
+      file.toLowerCase(),
+      "skill.md",
+      `commands/${file} would make Claude Code treat commands/ as a skill directory`
+    );
+  }
 });
 
 test("rescue command absorbs continue semantics", () => {

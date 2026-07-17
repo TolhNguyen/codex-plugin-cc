@@ -318,7 +318,7 @@ export OPENAI_COMPAT_API_KEY=...
 - `/codex:bootstrap-agents` — analyze the repository and propose an agent topology + draft skills.
   Nothing is activated automatically. Approve with
   `/codex:bootstrap-agents --approve --approved-by <role>`.
-- `/codex:skill list` / `/codex:skill activate <skill-id> --approved-by <role>` — move a skill
+- `/codex:skills list` / `/codex:skills activate <skill-id> --approved-by <role>` — move a skill
   `draft → active` so routing and workers may use it.
 - `/codex:campaign <create|list|show|run-task|approve|review-proposals|accept>` — run a campaign
   end-to-end. Approvals, memory decisions, and final acceptance each require an explicit role
@@ -331,7 +331,7 @@ export DEEPSEEK_API_KEY=sk-...
 
 /codex:bootstrap-agents                                  # propose topology (writes .ai-company/)
 /codex:bootstrap-agents --approve --approved-by you      # register agents (active) + skills (draft)
-/codex:skill activate technical/node-test-authoring --approved-by you
+/codex:skills activate technical/node-test-authoring --approved-by you
 
 /codex:campaign create --brief "Add tests for the review loop"
 /codex:campaign approve <campaignId> --approved-by you   # draft/awaiting_approval -> running

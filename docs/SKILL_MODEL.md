@@ -96,8 +96,9 @@ Nothing in the shipped CLI drives a skill through `evaluating` /
 `setSkillStatus(rootDir, id, "evaluating")` +
 `setSkillStatus(rootDir, id, "approved", { approvedBy })` +
 `setSkillStatus(rootDir, id, "active", { approvedBy })`, called directly
-(there is no `/codex:skills` command in the MVP scope — see
-`docs/TARGET_ARCHITECTURE.md` §2's deferred list).
+(the shipped `/codex:skills activate <id> --approved-by <role>` command —
+`orchestration-cli.mjs skill activate` — walks those three transitions in
+one call; `recordEvaluation` evidence is still recorded manually).
 
 ## 5. The ACTIVE-only rule for workers
 

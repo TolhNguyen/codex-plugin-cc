@@ -166,10 +166,10 @@ subcommand will happily run for any caller that supplies `--approved-by`).
 
 ### 2.4 Skill evaluation (manual, outside the shipped CLI)
 
-There is no `/codex:skills` command or CLI subcommand for this in the MVP
-(deferred per `docs/TARGET_ARCHITECTURE.md` §2). Driving a skill from
-`draft` to `active` means calling `setSkillStatus` directly through the
-registry module (or a short ad-hoc script) three times, in order —
+The shipped `/codex:skills activate <id> --approved-by <role>` command
+(`orchestration-cli.mjs skill activate`) walks a skill from `draft` to
+`active` in one call. Under the hood that is `setSkillStatus` through the
+registry module three times, in order —
 `draft->evaluating` (no approval needed), `evaluating->approved`
 (`approvedBy` required), `approved->active` (`approvedBy` required again)
 — interspersed with whatever evaluation-task evidence your process wants
